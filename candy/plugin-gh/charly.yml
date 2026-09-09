@@ -1,0 +1,23 @@
+plugin-gh:
+    candy:
+        version: 2026.252.1500
+        description: |-
+            The canonical GitHub surface — one implementation of the gh read ops
+            (pr_meta, pr_files, pr_diff, pr_commits, pr_thread, head_sha) as a
+            typed, declarative verb (`gh: {op: ..., repo: ..., pr: ...}`) and the
+            standalone `charly gh` CLI. Replaces every hand-rolled
+            exec.Command("gh") call: the client resolves the token explicitly
+            (GH_TOKEN/GITHUB_TOKEN → the gh hosts.yml auth), targets
+            api.github.com directly (never an ambiguous default-host redirect),
+            and surfaces the HTTP status + body on every non-2xx — no more
+            "gh meta failed" with swallowed stderr.
+        plugin:
+            providers:
+                - verb:gh
+                - command:gh
+            source: github.com/opencharly/plugin-gh/candy/plugin-gh
+        plan:
+            - check: the gh module ships (go.mod + the client + the provider + the schema)
+              id: plugin-gh-module-present
+              context: [build]
+              command: "test -f go.mod && test -f gh/ghkit.go && test -f plugin.go && test -f schema/gh.cue"
