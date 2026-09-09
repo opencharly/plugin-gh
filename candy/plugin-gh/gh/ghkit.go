@@ -35,32 +35,39 @@ import (
 const DefaultBaseURL = "https://api.github.com"
 
 type Client struct {
-	BaseURL string
-	Token   string
-	HTTP    *http.Client
+	BaseURL     string
+	Token       string
+	tokenSource string
+	HTTP        *http.Client
 }
+
+// TokenSource reports where the token came from (the evidence packet names it).
+func (c *Client) TokenSource() string { return c.tokenSource }
 
 // New resolves the token + the API base from the documented layers.
 func New() (*Client, error) {
-	token, _, err := resolveToken()
-	if err != nil {
-		return nil, err
+	token, src, tokenErr := resolveToken()
+	if tokenErr != nil {
+		// a MISSING token is not a construction error: public-repo reads work
+		// unauthenticated (rate-limited) — the auth failure surfaces AT THE CALL
+		// with the HTTP status + body, never as a speculative abort.
+		src = "none (public/unauthenticated reads only)"
+		token = ""
 	}
 	base := os.Getenv("GITHUB_API_URL")
 	if base == "" {
 		base = DefaultBaseURL
 	}
 	return &Client{
-		BaseURL: strings.TrimRight(base, "/"),
-		Token:   token,
-		HTTP:    &http.Client{Timeout: 60 * time.Second},
+		BaseURL:     strings.TrimRight(base, "/"),
+		Token:       token,
+		tokenSource: src,
+		HTTP:        &http.Client{Timeout: 60 * time.Second},
 	}, nil
 }
 
-// TokenSource reports where the token came from (the evidence packet names it).
-func (c *Client) TokenSource() string { return tokenSource }
-
-var tokenSource string
+// tokenSource is per-CLIENT (concurrent clients never share state — the
+// curLedger lesson, RCA 2026.252.2210).
 
 func resolveToken() (token string, source string, err error) {
 	for _, k := range []string{"GH_TOKEN", "GITHUB_TOKEN"} {
