@@ -147,15 +147,15 @@ func TestPRFiles_PerFilePatchAndPagination(t *testing.T) {
 	if last.Path != "big.go" || last.Patch == "" {
 		t.Fatalf("the second-page file must carry its own patch: %+v", last)
 	}
-	if files[0].Patch == "" || files[0].Binary {
+	if files[0].Patch == "" || files[0].NoPatch {
 		t.Fatalf("a file WITH a patch must not be marked binary: %+v", files[0])
 	}
 }
 
-// TestPRFiles_BinaryHasNoPatch pins the binary signal: a file the API returns
-// without a patch is marked Binary, so a caller never reads "no patch" as "no
-// change".
-func TestPRFiles_BinaryHasNoPatch(t *testing.T) {
+// TestPRFiles_NoPatchFlag pins the NoPatch signal: a file the API returns
+// without patch text is marked NoPatch (not silently "binary"), so a caller
+// never reads "no patch" as "no change" NOR assumes it is a binary file.
+func TestPRFiles_NoPatchFlag(t *testing.T) {
 	c := testClient(t, func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`[{"filename":"logo.png","status":"added","additions":0,"deletions":0}]`))
 	})
@@ -163,8 +163,8 @@ func TestPRFiles_BinaryHasNoPatch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(files) != 1 || !files[0].Binary {
-		t.Fatalf("a patch-less file must be Binary: %+v", files)
+	if len(files) != 1 || !files[0].NoPatch {
+		t.Fatalf("a patch-less file must be NoPatch: %+v", files)
 	}
 }
 

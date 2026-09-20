@@ -113,72 +113,85 @@ func hostsToken() (string, string, error) {
 	return "", "", fmt.Errorf("gh: no token found (GH_TOKEN/GITHUB_TOKEN unset, hosts.yml has no github.com oauth_token)")
 }
 
+// maxBodyBytes bounds ONE response body (a memory guard, not a content policy).
+// 64 MiB so even a very large PR diff is read whole — a truncated diff would
+// silently blind a caller. ONE value, shared by every request path.
+const maxBodyBytes = 64 << 20
+
 // Get performs a GET and decodes the JSON body; non-2xx surfaces status + body.
 func (c *Client) Get(ctx context.Context, path string, out any) error {
-	return c.do(ctx, http.MethodGet, path, "", "application/vnd.github+json", out)
+	_, err := c.requestJSON(ctx, http.MethodGet, path, nil, out)
+	return err
 }
 
-// Post performs a POST with a JSON body; non-2xx surfaces status + body.
+// Post performs a POST with a JSON body; non-2xx surfaces status + body. A
+// marshal failure is a real error (never a silent empty body).
 func (c *Client) Post(ctx context.Context, path string, body any, out any) error {
-	return c.do(ctx, http.MethodPost, path, encodeJSON(body), "application/vnd.github+json", out)
+	_, err := c.requestJSON(ctx, http.MethodPost, path, body, out)
+	return err
 }
 
-// do is the ONE request path (Get/Post/PRDiff all route through it), so auth,
-// the API-version header, the 8 MiB read bound and the surfacing of a non-2xx
-// status + body live in exactly one place.
-func (c *Client) do(ctx context.Context, method, path, body, accept string, out any) error {
+// requestJSON is the ONE JSON request path: Get/Post and every typed read route
+// through it, so auth, the API-version header, the read bound and the non-2xx
+// status+body surfacing live in exactly one place (R3). A non-nil `out` decodes
+// the body; a non-nil `body` is marshalled (a marshal error is returned).
+func (c *Client) requestJSON(ctx context.Context, method, path string, body any, out any) ([]byte, error) {
 	var rdr io.Reader
-	if body != "" {
-		rdr = strings.NewReader(body)
+	if body != nil {
+		b, err := json.Marshal(body)
+		if err != nil {
+			return nil, fmt.Errorf("gh: %s: encode request body: %w", path, err)
+		}
+		rdr = strings.NewReader(string(b))
 	}
-	req, err := http.NewRequestWithContext(ctx, method, c.BaseURL+path, rdr)
+	_, b, err := c.request(ctx, method, path, rdr, body != nil, "application/vnd.github+json")
 	if err != nil {
-		return err
+		return nil, err
+	}
+	if out != nil {
+		if err := json.Unmarshal(b, out); err != nil {
+			return nil, fmt.Errorf("gh: %s: decode: %w", path, err)
+		}
+	}
+	return b, nil
+}
+
+// request is the ONE HTTP path (requestJSON and requestRaw both route through
+// it): it sets auth + the API-version header, bounds the read, and surfaces a
+// non-2xx status + body. It returns the raw body for a caller that needs no
+// JSON decode (the diff media type).
+func (c *Client) request(ctx context.Context, method, path string, body io.Reader, hasBody bool, accept string) (*http.Response, []byte, error) {
+	req, err := http.NewRequestWithContext(ctx, method, c.BaseURL+path, body)
+	if err != nil {
+		return nil, nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+c.Token)
 	req.Header.Set("Accept", accept)
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
-	if body != "" {
+	if hasBody {
 		req.Header.Set("Content-Type", "application/json")
 	}
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
-		return fmt.Errorf("gh: %s: %w", path, err)
+		return nil, nil, fmt.Errorf("gh: %s: %w", path, err)
 	}
 	defer resp.Body.Close()
-	// 64 MiB: the diff endpoint of a large PR (the 25-file spec PR is ~100 KiB;
-	// a huge generated PR can be multi-MiB) must not be silently cut at 8 MiB —
-	// a truncated diff would blind a caller. The read bound is a memory guard,
-	// not a content policy.
-	b, err := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
+	b, err := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
 	if err != nil {
-		return fmt.Errorf("gh: %s: read: %w", path, err)
+		return nil, nil, fmt.Errorf("gh: %s: read: %w", path, err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("gh: %s: HTTP %d: %s", path, resp.StatusCode, truncate(string(b), 300))
+		return nil, nil, fmt.Errorf("gh: %s: HTTP %d: %s", path, resp.StatusCode, truncate(string(b), 300))
 	}
-	if out != nil {
-		if err := json.Unmarshal(b, out); err != nil {
-			return fmt.Errorf("gh: %s: decode: %w", path, err)
-		}
-	}
-	return nil
+	return resp, b, nil
 }
 
-func encodeJSON(v any) string {
-	b, err := json.Marshal(v)
-	if err != nil {
-		return "{}"
-	}
-	return string(b)
-}
-
-// getAll pages a list endpoint to completion: GitHub caps `per_page` at 100, so
+// getAll pages a list endpoint to completion. GitHub caps `per_page` at 100, so
 // a list longer than one page MUST be followed (a single page silently drops
-// the tail — the very class the review gate's thread fix removed). It walks
-// pages until a short page arrives and decodes every page into append-only
-// slices of the caller's element type via a decode callback, so it stays
-// generic over the response struct.
+// the tail — the very class the review gate's thread fix removed); it pages by
+// page-count and stops on the first SHORT page (the same page-count contract
+// the API itself exposes, without parsing the Link header). Each page is
+// decoded by the caller's callback, which returns the rows added.
 func (c *Client) getAll(ctx context.Context, path string, maxPages int, decode func([]byte) (int, error)) error {
 	if maxPages <= 0 {
 		maxPages = 50
@@ -189,30 +202,15 @@ func (c *Client) getAll(ctx context.Context, path string, maxPages int, decode f
 			sep = "&"
 		}
 		full := fmt.Sprintf("%s%sper_page=100&page=%d", path, sep, page)
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.BaseURL+full, nil)
+		_, b, err := c.request(ctx, http.MethodGet, full, nil, false, "application/vnd.github+json")
 		if err != nil {
 			return err
 		}
-		req.Header.Set("Authorization", "Bearer "+c.Token)
-		req.Header.Set("Accept", "application/vnd.github+json")
-		req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
-		resp, err := c.HTTP.Do(req)
-		if err != nil {
-			return fmt.Errorf("gh: %s: %w", full, err)
-		}
-		b, rerr := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
-		resp.Body.Close()
-		if rerr != nil {
-			return fmt.Errorf("gh: %s: read: %w", full, rerr)
-		}
-		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			return fmt.Errorf("gh: %s: HTTP %d: %s", full, resp.StatusCode, truncate(string(b), 300))
-		}
-		before, err := decode(b)
+		added, err := decode(b)
 		if err != nil {
 			return fmt.Errorf("gh: %s: decode: %w", full, err)
 		}
-		if before == 0 || before < 100 {
+		if added < 100 {
 			return nil
 		}
 	}
@@ -247,12 +245,15 @@ type PRFile struct {
 	// Status is the file's change kind: added | removed | modified | renamed |
 	// copied | changed | unchanged.
 	Status string `json:"status"`
-	// Patch is the file's unified-diff hunk text. Empty for a binary file or an
-	// empty change (Binary=true then).
+	// Patch is the file's unified-diff hunk text. Empty when the API returned no
+	// patch — which happens for a BINARY file, a rename/copy with no content
+	// change, or a file too large to render. `NoPatch` records exactly that, so a
+	// caller never has to infer "binary" from an empty string.
 	Patch string `json:"patch"`
-	// Binary marks a file the API returned without a patch (binary or too large
-	// to render). A caller must NOT treat Patch=="" as "no change" without it.
-	Binary bool `json:"-"`
+	// NoPatch is true when the API returned no patch text for this file. It is
+	// NOT a synonym for "binary": check Status and the additions/deletions to
+	// decide why. A rename-only change has NoPatch==true and is not binary.
+	NoPatch bool `json:"-"`
 }
 
 // PRComment is one issue-comment with its id (a caller reads a comment BY ID so
@@ -317,7 +318,7 @@ func (c *Client) PRFiles(ctx context.Context, repo string, pr int) ([]PRFile, er
 		for _, f := range page {
 			files = append(files, PRFile{
 				Path: f.Filename, Status: f.Status, Additions: f.Additions, Deletions: f.Deletions,
-				Patch: f.Patch, Binary: f.Patch == "",
+				Patch: f.Patch, NoPatch: f.Patch == "",
 			})
 		}
 		return len(page), nil
@@ -372,30 +373,9 @@ func (c *Client) PRPaths(ctx context.Context, repo string, pr int) (string, erro
 // deliver the change one file at a time should prefer PRFiles (per-file Patch);
 // PRDiff is retained for callers that genuinely want the unified whole.
 func (c *Client) PRDiff(ctx context.Context, repo string, pr int) (string, error) {
-	return c.doRaw(ctx, fmt.Sprintf("/repos/%s/pulls/%d", repo, pr), "application/vnd.github.diff")
-}
-
-// doRaw runs a single request and returns the raw body (for a non-JSON accept,
-// e.g. the diff media type). Non-2xx surfaces status + body.
-func (c *Client) doRaw(ctx context.Context, path, accept string) (string, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.BaseURL+path, nil)
+	_, b, err := c.request(ctx, http.MethodGet, fmt.Sprintf("/repos/%s/pulls/%d", repo, pr), nil, false, "application/vnd.github.diff")
 	if err != nil {
 		return "", err
-	}
-	req.Header.Set("Authorization", "Bearer "+c.Token)
-	req.Header.Set("Accept", accept)
-	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
-	resp, err := c.HTTP.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("gh: %s: %w", path, err)
-	}
-	defer resp.Body.Close()
-	b, err := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
-	if err != nil {
-		return "", fmt.Errorf("gh: %s: read: %w", path, err)
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", fmt.Errorf("gh: %s: HTTP %d: %s", path, resp.StatusCode, truncate(string(b), 300))
 	}
 	return string(b), nil
 }
