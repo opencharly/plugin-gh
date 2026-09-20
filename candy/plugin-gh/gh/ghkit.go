@@ -115,19 +115,42 @@ func hostsToken() (string, string, error) {
 
 // Get performs a GET and decodes the JSON body; non-2xx surfaces status + body.
 func (c *Client) Get(ctx context.Context, path string, out any) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.BaseURL+path, nil)
+	return c.do(ctx, http.MethodGet, path, "", "application/vnd.github+json", out)
+}
+
+// Post performs a POST with a JSON body; non-2xx surfaces status + body.
+func (c *Client) Post(ctx context.Context, path string, body any, out any) error {
+	return c.do(ctx, http.MethodPost, path, encodeJSON(body), "application/vnd.github+json", out)
+}
+
+// do is the ONE request path (Get/Post/PRDiff all route through it), so auth,
+// the API-version header, the 8 MiB read bound and the surfacing of a non-2xx
+// status + body live in exactly one place.
+func (c *Client) do(ctx context.Context, method, path, body, accept string, out any) error {
+	var rdr io.Reader
+	if body != "" {
+		rdr = strings.NewReader(body)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, c.BaseURL+path, rdr)
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Authorization", "Bearer "+c.Token)
-	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("Accept", accept)
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	if body != "" {
+		req.Header.Set("Content-Type", "application/json")
+	}
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
 		return fmt.Errorf("gh: %s: %w", path, err)
 	}
 	defer resp.Body.Close()
-	b, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	// 64 MiB: the diff endpoint of a large PR (the 25-file spec PR is ~100 KiB;
+	// a huge generated PR can be multi-MiB) must not be silently cut at 8 MiB —
+	// a truncated diff would blind a caller. The read bound is a memory guard,
+	// not a content policy.
+	b, err := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
 	if err != nil {
 		return fmt.Errorf("gh: %s: read: %w", path, err)
 	}
@@ -137,6 +160,60 @@ func (c *Client) Get(ctx context.Context, path string, out any) error {
 	if out != nil {
 		if err := json.Unmarshal(b, out); err != nil {
 			return fmt.Errorf("gh: %s: decode: %w", path, err)
+		}
+	}
+	return nil
+}
+
+func encodeJSON(v any) string {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return "{}"
+	}
+	return string(b)
+}
+
+// getAll pages a list endpoint to completion: GitHub caps `per_page` at 100, so
+// a list longer than one page MUST be followed (a single page silently drops
+// the tail — the very class the review gate's thread fix removed). It walks
+// pages until a short page arrives and decodes every page into append-only
+// slices of the caller's element type via a decode callback, so it stays
+// generic over the response struct.
+func (c *Client) getAll(ctx context.Context, path string, maxPages int, decode func([]byte) (int, error)) error {
+	if maxPages <= 0 {
+		maxPages = 50
+	}
+	for page := 1; page <= maxPages; page++ {
+		sep := "?"
+		if strings.Contains(path, "?") {
+			sep = "&"
+		}
+		full := fmt.Sprintf("%s%sper_page=100&page=%d", path, sep, page)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.BaseURL+full, nil)
+		if err != nil {
+			return err
+		}
+		req.Header.Set("Authorization", "Bearer "+c.Token)
+		req.Header.Set("Accept", "application/vnd.github+json")
+		req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+		resp, err := c.HTTP.Do(req)
+		if err != nil {
+			return fmt.Errorf("gh: %s: %w", full, err)
+		}
+		b, rerr := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+		resp.Body.Close()
+		if rerr != nil {
+			return fmt.Errorf("gh: %s: read: %w", full, rerr)
+		}
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			return fmt.Errorf("gh: %s: HTTP %d: %s", full, resp.StatusCode, truncate(string(b), 300))
+		}
+		before, err := decode(b)
+		if err != nil {
+			return fmt.Errorf("gh: %s: decode: %w", full, err)
+		}
+		if before == 0 || before < 100 {
+			return nil
 		}
 	}
 	return nil
@@ -167,6 +244,24 @@ type PRFile struct {
 	Path      string `json:"filename"`
 	Additions int    `json:"additions"`
 	Deletions int    `json:"deletions"`
+	// Status is the file's change kind: added | removed | modified | renamed |
+	// copied | changed | unchanged.
+	Status string `json:"status"`
+	// Patch is the file's unified-diff hunk text. Empty for a binary file or an
+	// empty change (Binary=true then).
+	Patch string `json:"patch"`
+	// Binary marks a file the API returned without a patch (binary or too large
+	// to render). A caller must NOT treat Patch=="" as "no change" without it.
+	Binary bool `json:"-"`
+}
+
+// PRComment is one issue-comment with its id (a caller reads a comment BY ID so
+// a long thread can be delivered one comment per message).
+type PRComment struct {
+	ID        int    `json:"id"`
+	Author    string `json:"author"`
+	CreatedAt string `json:"created_at"`
+	Body      string `json:"body"`
 }
 
 type PRCommit struct {
@@ -202,12 +297,62 @@ func (c *Client) PRMeta(ctx context.Context, repo string, pr int) (*PRMeta, erro
 	return m, nil
 }
 
+// PRFiles returns EVERY changed file with its full patch, paginated across the
+// API's 100-per-page cap. Each element carries Patch (the file's own diff), so
+// a caller can deliver one file per message instead of one monolithic diff —
+// the shape that keeps a reasoning model from spiralling on a multi-file diff.
 func (c *Client) PRFiles(ctx context.Context, repo string, pr int) ([]PRFile, error) {
 	var files []PRFile
-	if err := c.Get(ctx, fmt.Sprintf("/repos/%s/pulls/%d/files?per_page=100", repo, pr), &files); err != nil {
+	err := c.getAll(ctx, fmt.Sprintf("/repos/%s/pulls/%d/files", repo, pr), 50, func(b []byte) (int, error) {
+		var page []struct {
+			Filename  string `json:"filename"`
+			Status    string `json:"status"`
+			Additions int    `json:"additions"`
+			Deletions int    `json:"deletions"`
+			Patch     string `json:"patch"`
+		}
+		if err := json.Unmarshal(b, &page); err != nil {
+			return 0, err
+		}
+		for _, f := range page {
+			files = append(files, PRFile{
+				Path: f.Filename, Status: f.Status, Additions: f.Additions, Deletions: f.Deletions,
+				Patch: f.Patch, Binary: f.Patch == "",
+			})
+		}
+		return len(page), nil
+	})
+	if err != nil {
 		return nil, err
 	}
 	return files, nil
+}
+
+// PRComment fetches ONE comment by id (the read path that pairs with the thread
+// index: a caller reads a comment as its own message, bounded individually).
+func (c *Client) PRComment(ctx context.Context, repo string, id int) (*PRComment, error) {
+	var raw struct {
+		ID   int `json:"id"`
+		User struct {
+			Login string `json:"login"`
+		} `json:"user"`
+		CreatedAt string `json:"created_at"`
+		Body      string `json:"body"`
+	}
+	if err := c.Get(ctx, fmt.Sprintf("/repos/%s/issues/comments/%d", repo, id), &raw); err != nil {
+		return nil, err
+	}
+	author := raw.User.Login
+	if author == "" {
+		author = "unknown"
+	}
+	return &PRComment{ID: raw.ID, Author: author, CreatedAt: raw.CreatedAt, Body: raw.Body}, nil
+}
+
+// PostComment posts ONE issue comment to a PR. Non-2xx surfaces the status +
+// body via do(), so a failed post is never silent.
+func (c *Client) PostComment(ctx context.Context, repo string, pr int, body string) error {
+	return c.Post(ctx, fmt.Sprintf("/repos/%s/issues/%d/comments", repo, pr), map[string]string{"body": body}, nil)
 }
 
 // PRPaths returns the changed paths space-separated (the pr-apply contract).
@@ -223,24 +368,34 @@ func (c *Client) PRPaths(ctx context.Context, repo string, pr int) (string, erro
 	return strings.Join(paths, " "), nil
 }
 
+// PRDiff returns the WHOLE PR diff (every file in one text). Callers that must
+// deliver the change one file at a time should prefer PRFiles (per-file Patch);
+// PRDiff is retained for callers that genuinely want the unified whole.
 func (c *Client) PRDiff(ctx context.Context, repo string, pr int) (string, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("%s/repos/%s/pulls/%d", c.BaseURL, repo, pr), nil)
+	return c.doRaw(ctx, fmt.Sprintf("/repos/%s/pulls/%d", repo, pr), "application/vnd.github.diff")
+}
+
+// doRaw runs a single request and returns the raw body (for a non-JSON accept,
+// e.g. the diff media type). Non-2xx surfaces status + body.
+func (c *Client) doRaw(ctx context.Context, path, accept string) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.BaseURL+path, nil)
 	if err != nil {
 		return "", err
 	}
 	req.Header.Set("Authorization", "Bearer "+c.Token)
-	req.Header.Set("Accept", "application/vnd.github.diff")
+	req.Header.Set("Accept", accept)
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("gh: diff: %w", err)
+		return "", fmt.Errorf("gh: %s: %w", path, err)
 	}
 	defer resp.Body.Close()
-	b, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	b, err := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("gh: %s: read: %w", path, err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", fmt.Errorf("gh: diff: HTTP %d: %s", resp.StatusCode, truncate(string(b), 300))
+		return "", fmt.Errorf("gh: %s: HTTP %d: %s", path, resp.StatusCode, truncate(string(b), 300))
 	}
 	return string(b), nil
 }

@@ -2,10 +2,12 @@ package gh
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -115,3 +117,99 @@ func TestNew_BaseURLNeverRedirectsThroughHosts(t *testing.T) {
 		t.Errorf("base = %q, want the explicit api.github.com (the hosts.yml default-host redirect is the opaque-404 class)", c.BaseURL)
 	}
 }
+
+// TestPRFiles_PerFilePatchAndPagination pins the two load-bearing properties:
+// every file carries its OWN patch (so a caller can deliver one file per
+// message), and a >100-file list is paged to completion (a single page would
+// silently drop the tail).
+func TestPRFiles_PerFilePatchAndPagination(t *testing.T) {
+	c := testClient(t, func(w http.ResponseWriter, r *http.Request) {
+		page := r.URL.Query().Get("page")
+		if page == "2" {
+			_, _ = w.Write([]byte(`[{"filename":"big.go","status":"modified","additions":50,"deletions":1,"patch":"@@ -1 +1 @@\n-old\n+new"}]`))
+			return
+		}
+		// page 1: exactly 100 rows so the pager must continue
+		rows := make([]string, 100)
+		for i := range rows {
+			rows[i] = `{"filename":"f` + itoa(i) + `.go","status":"modified","additions":1,"deletions":0,"patch":"@@ -1 +1 @@\n-a\n+b"}`
+		}
+		_, _ = w.Write([]byte("[" + strings.Join(rows, ",") + "]"))
+	})
+	files, err := c.PRFiles(context.Background(), "o/r", 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 101 {
+		t.Fatalf("files = %d, want 101 (page 1 of 100 + page 2 of 1 — pagination must follow)", len(files))
+	}
+	last := files[len(files)-1]
+	if last.Path != "big.go" || last.Patch == "" {
+		t.Fatalf("the second-page file must carry its own patch: %+v", last)
+	}
+	if files[0].Patch == "" || files[0].Binary {
+		t.Fatalf("a file WITH a patch must not be marked binary: %+v", files[0])
+	}
+}
+
+// TestPRFiles_BinaryHasNoPatch pins the binary signal: a file the API returns
+// without a patch is marked Binary, so a caller never reads "no patch" as "no
+// change".
+func TestPRFiles_BinaryHasNoPatch(t *testing.T) {
+	c := testClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`[{"filename":"logo.png","status":"added","additions":0,"deletions":0}]`))
+	})
+	files, err := c.PRFiles(context.Background(), "o/r", 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 1 || !files[0].Binary {
+		t.Fatalf("a patch-less file must be Binary: %+v", files)
+	}
+}
+
+// TestPRComment_ById pins the single-comment read (the pair to the thread index).
+func TestPRComment_ById(t *testing.T) {
+	c := testClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/issues/comments/42") {
+			t.Errorf("must fetch the single comment by id, got %s", r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`{"id":42,"user":{"login":"bot"},"created_at":"2026-01-01T00:00:00Z","body":"finding x"}`))
+	})
+	cm, err := c.PRComment(context.Background(), "o/r", 42)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cm.ID != 42 || cm.Author != "bot" || cm.Body != "finding x" {
+		t.Fatalf("decoded = %+v", cm)
+	}
+}
+
+// TestPostComment_SendsBodyAndSurfacesFailure pins the POST path: the body
+// rides the request, and a non-2xx is an error with the status.
+func TestPostComment_SendsBodyAndSurfacesFailure(t *testing.T) {
+	var got string
+	ok := testClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Errorf("must POST, got %s", r.Method)
+		}
+		b, _ := io.ReadAll(r.Body)
+		got = string(b)
+		_, _ = w.Write([]byte(`{"id":1}`))
+	})
+	if err := ok.PostComment(context.Background(), "o/r", 3, "hello"); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, `"body":"hello"`) {
+		t.Fatalf("posted body = %q", got)
+	}
+	bad := testClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"message":"no"}`))
+	})
+	if err := bad.PostComment(context.Background(), "o/r", 3, "x"); err == nil || !strings.Contains(err.Error(), "403") {
+		t.Fatalf("a failed post must surface the status, got: %v", err)
+	}
+}
+
+func itoa(i int) string { return strconv.Itoa(i) }
