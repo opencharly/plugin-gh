@@ -329,6 +329,38 @@ func (c *Client) PRFiles(ctx context.Context, repo string, pr int) ([]PRFile, er
 	return files, nil
 }
 
+// PRComments lists EVERY issue comment (id + author + date + body), paginated to
+// completion. A caller builds a compact index from this and then reads a body by
+// id via PRComment, so a long thread is delivered one comment per message.
+func (c *Client) PRComments(ctx context.Context, repo string, pr int) ([]PRComment, error) {
+	var out []PRComment
+	err := c.getAll(ctx, fmt.Sprintf("/repos/%s/issues/%d/comments", repo, pr), func(b []byte) (int, error) {
+		var page []struct {
+			ID   int `json:"id"`
+			User struct {
+				Login string `json:"login"`
+			} `json:"user"`
+			CreatedAt string `json:"created_at"`
+			Body      string `json:"body"`
+		}
+		if err := json.Unmarshal(b, &page); err != nil {
+			return 0, err
+		}
+		for _, cm := range page {
+			author := cm.User.Login
+			if author == "" {
+				author = "unknown"
+			}
+			out = append(out, PRComment{ID: cm.ID, Author: author, CreatedAt: cm.CreatedAt, Body: cm.Body})
+		}
+		return len(page), nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // PRComment fetches ONE comment by id (the read path that pairs with the thread
 // index: a caller reads a comment as its own message, bounded individually).
 func (c *Client) PRComment(ctx context.Context, repo string, id int) (*PRComment, error) {
