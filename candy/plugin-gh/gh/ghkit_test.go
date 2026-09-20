@@ -213,3 +213,25 @@ func TestPostComment_SendsBodyAndSurfacesFailure(t *testing.T) {
 }
 
 func itoa(i int) string { return strconv.Itoa(i) }
+
+// TestPost_UnmarshalableBodyIsAnError pins the marshal-error path: a body that
+// cannot be encoded is a real error AND no request is sent — never a silent
+// empty POST with a nil return.
+func TestPost_UnmarshalableBodyIsAnError(t *testing.T) {
+	var called bool
+	c := testClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		called = true
+		_, _ = w.Write([]byte(`{}`))
+	})
+	// a channel cannot be marshalled by encoding/json
+	err := c.Post(context.Background(), "/repos/o/r/issues/1/comments", map[string]any{"body": make(chan int)}, nil)
+	if err == nil {
+		t.Fatal("an unmarshalable body must return an error")
+	}
+	if !strings.Contains(err.Error(), "encode request body") {
+		t.Fatalf("the error must name the encode failure, got: %v", err)
+	}
+	if called {
+		t.Fatal("no request may be sent when the body fails to encode")
+	}
+}
