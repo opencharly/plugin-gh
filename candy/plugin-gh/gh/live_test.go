@@ -3,31 +3,43 @@ package gh
 import (
 	"context"
 	"os"
+	"strconv"
 	"testing"
 	"time"
 )
 
 // live_test.go — the LIVE read proof. The unit tests above stub the HTTP
-// transport (that is ghkit's own boundary for decode/pagination logic); they
-// cannot prove the real API contract. This test reads a REAL public PR through
-// the real client and SKIPS when no token/API is reachable — never a fabricated
-// response.
+// transport (that is ghkit's own boundary for the decode/pagination LOGIC); they
+// cannot prove the real API contract. These tests read a REAL PR through the
+// real client.
 //
-//	GH_TOKEN / GITHUB_TOKEN: the live credential (public reads also work
-//	                         unauthenticated but rate-limit hard).
-//	GHKIT_LIVE_REPO default opencharly/plugin-review
-//	GHKIT_LIVE_PR   default 13
+// Per the project rulebook (AGENTS.md): a test that exercises a SERVICE must run
+// against the REAL service or SKIP — never a fabricated response. So these tests
+// require an EXPLICIT opt-in AND a reachable API, and SKIP otherwise. A skip here
+// is the honest outcome ("no live service"), not a pass; the live assertion is
+// only claimed when the run reports PASS with the pasted output in the PR body.
+//
+//	GHKIT_LIVE_REPO  REQUIRED to opt in (e.g. opencharly/plugin-review) — there is
+//	                 no hardcoded cross-repo default, so the suite never reaches
+//	                 the network unless the operator asks it to.
+//	GHKIT_LIVE_PR    the PR number (default 13)
+//	GH_TOKEN/GITHUB_TOKEN or an authenticated gh CLI: the credential.
 func liveClient(t *testing.T) (*Client, string, int) {
 	t.Helper()
+	repo := os.Getenv("GHKIT_LIVE_REPO")
+	if repo == "" {
+		t.Skip("SKIP: set GHKIT_LIVE_REPO to run the live GitHub read tests (no hardcoded default — the suite never reaches the network unasked)")
+	}
+	pr := 13
+	if v := os.Getenv("GHKIT_LIVE_PR"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			pr = n
+		}
+	}
 	c, err := New()
 	if err != nil {
 		t.Skipf("SKIP: no client: %v", err)
 	}
-	repo := os.Getenv("GHKIT_LIVE_REPO")
-	if repo == "" {
-		repo = "opencharly/plugin-review"
-	}
-	pr := 13
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	if _, err := c.PRMeta(ctx, repo, pr); err != nil {
