@@ -235,3 +235,30 @@ func TestPost_UnmarshalableBodyIsAnError(t *testing.T) {
 		t.Fatal("no request may be sent when the body fails to encode")
 	}
 }
+
+// TestPRComments_IndexWithIds pins the list-with-ids read: every comment's id
+// rides the index (so a caller can fetch a body by id) and a >100-comment
+// thread is paged complete.
+func TestPRComments_IndexWithIds(t *testing.T) {
+	c := testClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("page") == "2" {
+			_, _ = w.Write([]byte(`[{"id":101,"user":{"login":"b"},"created_at":"t","body":"last"}]`))
+			return
+		}
+		rows := make([]string, 100)
+		for i := range rows {
+			rows[i] = `{"id":` + itoa(i+1) + `,"user":{"login":"a"},"created_at":"t","body":"c"}`
+		}
+		_, _ = w.Write([]byte("[" + strings.Join(rows, ",") + "]"))
+	})
+	cms, err := c.PRComments(context.Background(), "o/r", 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cms) != 101 {
+		t.Fatalf("comments = %d, want 101 (paged complete)", len(cms))
+	}
+	if cms[100].ID != 101 || cms[100].Body != "last" {
+		t.Fatalf("the last comment must carry its id + body: %+v", cms[100])
+	}
+}
