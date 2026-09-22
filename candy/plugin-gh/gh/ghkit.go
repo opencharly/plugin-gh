@@ -39,10 +39,17 @@ type Client struct {
 	Token       string
 	tokenSource string
 	HTTP        *http.Client
+	// cache is the HTTP response cache (the shared spec/cache.Store). nil only on
+	// a Client built directly by a test that wants to bypass caching.
+	cache *responseCache
 }
 
 // TokenSource reports where the token came from (the evidence packet names it).
 func (c *Client) TokenSource() string { return c.tokenSource }
+
+// SetCache attaches the response cache (New does this; a bare test Client opts
+// in explicitly). Passing nil disables caching.
+func (c *Client) SetCache(rc *responseCache) { c.cache = rc }
 
 // New resolves the token + the API base from the documented layers.
 func New() (*Client, error) {
@@ -63,6 +70,7 @@ func New() (*Client, error) {
 		Token:       token,
 		tokenSource: src,
 		HTTP:        &http.Client{Timeout: 60 * time.Second},
+		cache:       newResponseCache(),
 	}, nil
 }
 
@@ -119,8 +127,10 @@ func hostsToken() (string, string, error) {
 const maxBodyBytes = 64 << 20
 
 // Get performs a GET and decodes the JSON body; non-2xx surfaces status + body.
+// The read is served through the response cache (ETag-revalidated), so a repeat
+// read of an unchanged resource costs no body fetch.
 func (c *Client) Get(ctx context.Context, path string, out any) error {
-	_, err := c.requestJSON(ctx, http.MethodGet, path, nil, out)
+	_, err := c.getCachedJSON(ctx, path, nil, out)
 	return err
 }
 
@@ -131,10 +141,11 @@ func (c *Client) Post(ctx context.Context, path string, body any, out any) error
 	return err
 }
 
-// requestJSON is the ONE JSON request path: Get/Post and every typed read route
-// through it, so auth, the API-version header, the read bound and the non-2xx
-// status+body surfacing live in exactly one place (R3). A non-nil `out` decodes
-// the body; a non-nil `body` is marshalled (a marshal error is returned).
+// requestJSON is the WRITE/uncached JSON path — Post and any non-GET route — so
+// auth, the API-version header, the read bound and the non-2xx status+body
+// surfacing live in exactly one place (R3). Cached GETs go through getCachedJSON
+// instead (a GET has an ETag to revalidate; a POST does not). A non-nil `out`
+// decodes the body; a non-nil `body` is marshalled (a marshal error is returned).
 func (c *Client) requestJSON(ctx context.Context, method, path string, body any, out any) ([]byte, error) {
 	var rdr io.Reader
 	if body != nil {
@@ -156,24 +167,14 @@ func (c *Client) requestJSON(ctx context.Context, method, path string, body any,
 	return b, nil
 }
 
-// request is the ONE HTTP path: requestJSON (Get/Post), getAll and PRDiff all
-// route through it. It sets auth + the API-version header, bounds the read, and
-// surfaces a non-2xx status + body, and returns the raw body for a caller that
-// needs no JSON decode (the diff media type).
+// request is the ONE UNCONDITIONAL HTTP path: it sets auth + the API-version
+// header, bounds the read, surfaces a non-2xx status + body, and returns the raw
+// body. Post and the raw-diff read go through it; a cacheable GET goes through
+// getCached (which adds the conditional-header + store logic).
 func (c *Client) request(ctx context.Context, method, path string, body io.Reader, hasBody bool, accept string) ([]byte, error) {
-	req, err := http.NewRequestWithContext(ctx, method, c.BaseURL+path, body)
+	resp, err := c.do(ctx, method, path, body, hasBody, accept, "")
 	if err != nil {
 		return nil, err
-	}
-	req.Header.Set("Authorization", "Bearer "+c.Token)
-	req.Header.Set("Accept", accept)
-	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
-	if hasBody {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	resp, err := c.HTTP.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("gh: %s: %w", path, err)
 	}
 	defer resp.Body.Close()
 	b, err := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
@@ -184,6 +185,70 @@ func (c *Client) request(ctx context.Context, method, path string, body io.Reade
 		return nil, fmt.Errorf("gh: %s: HTTP %d: %s", path, resp.StatusCode, truncate(string(b), 300))
 	}
 	return b, nil
+}
+
+// do issues ONE authenticated request and returns the raw response (the caller
+// owns the body). ifNoneMatch adds the conditional header (empty = unconditional).
+// The ONE request constructor every path shares (R3), so auth + the API-version
+// header live in exactly one place.
+func (c *Client) do(ctx context.Context, method, path string, body io.Reader, hasBody bool, accept, ifNoneMatch string) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, method, c.BaseURL+path, body)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.Token)
+	req.Header.Set("Accept", accept)
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	if hasBody {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	if ifNoneMatch != "" {
+		req.Header.Set("If-None-Match", ifNoneMatch)
+	}
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("gh: %s: %w", path, err)
+	}
+	return resp, nil
+}
+
+// requestConditional issues a GET with an optional If-None-Match and returns the
+// body, the response ETag, and whether upstream answered 304 Not Modified (the
+// caller then serves its cached body). A non-2xx/304 surfaces status + body.
+func (c *Client) requestConditional(ctx context.Context, path, accept, ifNoneMatch string) (body []byte, etag string, notModified bool, err error) {
+	resp, err := c.do(ctx, http.MethodGet, path, nil, false, accept, ifNoneMatch)
+	if err != nil {
+		return nil, "", false, err
+	}
+	defer resp.Body.Close()
+	b, err := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
+	if err != nil {
+		return nil, "", false, fmt.Errorf("gh: %s: read: %w", path, err)
+	}
+	if resp.StatusCode == http.StatusNotModified {
+		return nil, resp.Header.Get("ETag"), true, nil
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, "", false, fmt.Errorf("gh: %s: HTTP %d: %s", path, resp.StatusCode, truncate(string(b), 300))
+	}
+	return b, resp.Header.Get("ETag"), false, nil
+}
+
+// getCachedJSON is the cached GET-and-decode: it serves the body from the
+// response cache (immutable when components are given, ETag-revalidated
+// otherwise) and decodes it. The `cached` return is true when no network body
+// was fetched.
+func (c *Client) getCachedJSON(ctx context.Context, path string, immutable map[string]string, out any) (cached bool, err error) {
+	b, fromCache, err := c.getCached(ctx, path, "application/vnd.github+json", immutable)
+	if err != nil {
+		return false, err
+	}
+	if out != nil {
+		if err := json.Unmarshal(b, out); err != nil {
+			return false, fmt.Errorf("gh: %s: decode: %w", path, err)
+		}
+	}
+	return fromCache, nil
 }
 
 // getAll pages a list endpoint to completion. GitHub caps `per_page` at 100, so
@@ -202,7 +267,7 @@ func (c *Client) getAll(ctx context.Context, path string, decode func([]byte) (i
 			sep = "&"
 		}
 		full := fmt.Sprintf("%s%sper_page=100&page=%d", path, sep, page)
-		b, err := c.request(ctx, http.MethodGet, full, nil, false, "application/vnd.github+json")
+		b, _, err := c.getCached(ctx, full, "application/vnd.github+json", nil)
 		if err != nil {
 			return err
 		}
@@ -250,6 +315,9 @@ type PRFile struct {
 	// change, or a file too large to render. `NoPatch` records exactly that, so a
 	// caller never has to infer "binary" from an empty string.
 	Patch string `json:"patch"`
+	// SHA is the git blob SHA of the file at the head commit — the immutable
+	// coordinate the full content is fetched (and cached) by.
+	SHA string `json:"sha"`
 	// NoPatch is true when the API returned no patch text for this file. It is
 	// NOT a synonym for "binary": check Status and the additions/deletions to
 	// decide why. A rename-only change has NoPatch==true and is not binary.
@@ -311,6 +379,7 @@ func (c *Client) PRFiles(ctx context.Context, repo string, pr int) ([]PRFile, er
 			Additions int    `json:"additions"`
 			Deletions int    `json:"deletions"`
 			Patch     string `json:"patch"`
+			SHA       string `json:"sha"`
 		}
 		if err := json.Unmarshal(b, &page); err != nil {
 			return 0, err
@@ -318,7 +387,7 @@ func (c *Client) PRFiles(ctx context.Context, repo string, pr int) ([]PRFile, er
 		for _, f := range page {
 			files = append(files, PRFile{
 				Path: f.Filename, Status: f.Status, Additions: f.Additions, Deletions: f.Deletions,
-				Patch: f.Patch, NoPatch: f.Patch == "",
+				Patch: f.Patch, SHA: f.SHA, NoPatch: f.Patch == "",
 			})
 		}
 		return len(page), nil
@@ -405,7 +474,7 @@ func (c *Client) PRPaths(ctx context.Context, repo string, pr int) (string, erro
 // deliver the change one file at a time should prefer PRFiles (per-file Patch);
 // PRDiff is retained for callers that genuinely want the unified whole.
 func (c *Client) PRDiff(ctx context.Context, repo string, pr int) (string, error) {
-	b, err := c.request(ctx, http.MethodGet, fmt.Sprintf("/repos/%s/pulls/%d", repo, pr), nil, false, "application/vnd.github.diff")
+	b, _, err := c.getCached(ctx, fmt.Sprintf("/repos/%s/pulls/%d", repo, pr), "application/vnd.github.diff", nil)
 	if err != nil {
 		return "", err
 	}

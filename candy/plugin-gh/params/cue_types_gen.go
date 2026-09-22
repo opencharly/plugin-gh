@@ -2,11 +2,206 @@
 
 package params
 
-// The verb:gh input (the check surface's `gh: {...}` map).
+// #GhInput — the verb input. `op` selects the read; the document op adds the
+// target/format/out/include_file_content knobs.
 type GhInput struct {
-	Op string `json:"op"`
+	// op — the read to run. The first six are the original PR reads; `document`
+	// assembles the full structured issue/PR artifact.
+	Op string `yaml:"op,omitempty" json:"op"`
 
-	Repo string `json:"repo"`
+	// repo — the FULL slug (owner/name) — e.g. omacom/omarchy
+	Repo string `yaml:"repo,omitempty" json:"repo"`
 
-	Pr int `json:"pr"`
+	// number — the issue OR pull-request number (renamed from `pr`: the document
+	// op addresses issues too, and `pr` mis-described an issue read).
+	Number int `yaml:"number,omitempty" json:"number"`
+
+	// target — document only: which artifact to assemble. Omitted auto-detects
+	// (a pull request number yields a PR document; anything else an issue).
+	Target string `yaml:"target,omitempty" json:"target,omitempty"`
+
+	// format — document only: the serialization of the emitted file (default json).
+	Format string `yaml:"format,omitempty" json:"format,omitempty"`
+
+	// out — document only: write the serialized document to this path. Omitted
+	// returns the document inline in the verb result.
+	Out string `yaml:"out,omitempty" json:"out,omitempty"`
+
+	// include_file_content — document only: fetch each changed file's COMPLETE
+	// content at the head commit (via the git-blobs endpoint), not just its diff.
+	// A pointer so omission (nil) means the DEFAULT (true) while an explicit false
+	// disables it; a binary or oversized file is recorded with omitted_reason.
+	IncludeFileContent *bool `yaml:"include_file_content,omitempty" json:"include_file_content,omitempty"`
+}
+
+// #GhDocument — the structured issue/PR artifact. EVERY comment surface is
+// present: the issue/PR body, the issue comments, and (for a PR) the reviews and
+// the inline review comments. PR documents additionally carry the commits and
+// every changed file (patch + optional full content at head).
+type GhDocument struct {
+	Kind string `yaml:"kind,omitempty" json:"kind"`
+
+	Repo string `yaml:"repo,omitempty" json:"repo"`
+
+	Number int `yaml:"number,omitempty" json:"number"`
+
+	URL string `yaml:"url,omitempty" json:"url"`
+
+	Title string `yaml:"title,omitempty" json:"title"`
+
+	State string `yaml:"state,omitempty" json:"state"`
+
+	Author string `yaml:"author,omitempty" json:"author"`
+
+	// created_at / updated_at / fetched_at are RFC3339 timestamps.
+	CreatedAt string `yaml:"created_at,omitempty" json:"created_at"`
+
+	UpdatedAt string `yaml:"updated_at,omitempty" json:"updated_at"`
+
+	Body string `yaml:"body,omitempty" json:"body"`
+
+	Labels []string `yaml:"labels,omitempty" json:"labels"`
+
+	Assignees []string `yaml:"assignees,omitempty" json:"assignees,omitempty"`
+
+	Comments []GhComment `yaml:"comments,omitempty" json:"comments"`
+
+	// pr is present iff kind == "pr" (a pointer so an issue document omits it).
+	PR *GhPR `yaml:"pr,omitempty" json:"pr,omitempty"`
+
+	// fetched_at is when the plugin assembled this document.
+	FetchedAt string `yaml:"fetched_at,omitempty" json:"fetched_at"`
+
+	Provenance GhProvenance `yaml:"provenance,omitempty" json:"provenance"`
+}
+
+// #GhComment — one issue/PR (timeline) comment.
+type GhComment struct {
+	ID int `yaml:"id,omitempty" json:"id"`
+
+	Author string `yaml:"author,omitempty" json:"author"`
+
+	CreatedAt string `yaml:"created_at,omitempty" json:"created_at"`
+
+	Body string `yaml:"body,omitempty" json:"body"`
+}
+
+// #GhProvenance — how the document was produced (the evidence header).
+type GhProvenance struct {
+	APIBase string `yaml:"api_base,omitempty" json:"api_base"`
+
+	TokenSource string `yaml:"token_source,omitempty" json:"token_source"`
+
+	// cached is true when the document assembly served at least one response
+	// from the local cache without re-fetching the body.
+	Cached bool `yaml:"cached,omitempty" json:"cached"`
+}
+
+// #GhPR — the pull-request-specific block.
+type GhPR struct {
+	HeadSHA string `yaml:"head_sha,omitempty" json:"head_sha"`
+
+	BaseRef string `yaml:"base_ref,omitempty" json:"base_ref"`
+
+	HeadRef string `yaml:"head_ref,omitempty" json:"head_ref"`
+
+	Draft bool `yaml:"draft,omitempty" json:"draft"`
+
+	Mergeable *bool `yaml:"mergeable,omitempty" json:"mergeable,omitempty"`
+
+	Additions int `yaml:"additions,omitempty" json:"additions"`
+
+	Deletions int `yaml:"deletions,omitempty" json:"deletions"`
+
+	ChangedFiles int `yaml:"changed_files,omitempty" json:"changed_files"`
+
+	Commits []GhCommit `yaml:"commits,omitempty" json:"commits"`
+
+	Files []GhFile `yaml:"files,omitempty" json:"files"`
+
+	Reviews []GhReview `yaml:"reviews,omitempty" json:"reviews"`
+
+	ReviewComments []GhReviewComment `yaml:"review_comments,omitempty" json:"review_comments"`
+}
+
+// #GhCommit — one commit on the PR.
+type GhCommit struct {
+	SHA string `yaml:"sha,omitempty" json:"sha"`
+
+	Message string `yaml:"message,omitempty" json:"message"`
+
+	Author string `yaml:"author,omitempty" json:"author"`
+
+	Date string `yaml:"date,omitempty" json:"date"`
+}
+
+// #GhFile — one changed file: its diff (patch) plus, when include_file_content
+// is on, its complete content at the head commit.
+type GhFile struct {
+	Path string `yaml:"path,omitempty" json:"path"`
+
+	Status string `yaml:"status,omitempty" json:"status"`
+
+	Additions int `yaml:"additions,omitempty" json:"additions"`
+
+	Deletions int `yaml:"deletions,omitempty" json:"deletions"`
+
+	// patch is the unified-diff hunk text (empty when GitHub returned none).
+	Patch string `yaml:"patch,omitempty" json:"patch"`
+
+	NoPatch bool `yaml:"no_patch,omitempty" json:"no_patch"`
+
+	// blob_sha is the git blob SHA of the file at the head commit — the immutable
+	// coordinate the content is fetched (and cached) by.
+	BlobSHA string `yaml:"blob_sha,omitempty" json:"blob_sha,omitempty"`
+
+	// content is the file's full text at head (present iff is_binary is false and
+	// the file was not omitted).
+	Content string `yaml:"content,omitempty" json:"content,omitempty"`
+
+	// content_encoding is "utf-8" for the decoded text content.
+	ContentEncoding string `yaml:"content_encoding,omitempty" json:"content_encoding,omitempty"`
+
+	// is_binary marks a file whose content is not text (content omitted).
+	IsBinary bool `yaml:"is_binary,omitempty" json:"is_binary,omitempty"`
+
+	// truncated marks a text file whose content exceeded the size cap.
+	Truncated bool `yaml:"truncated,omitempty" json:"truncated,omitempty"`
+
+	// omitted_reason names WHY content is absent: "binary" | "too_large" | "fetch_failed".
+	OmittedReason string `yaml:"omitted_reason,omitempty" json:"omitted_reason,omitempty"`
+}
+
+// #GhReview — one submitted PR review (APPROVED / CHANGES_REQUESTED / COMMENTED /
+// DISMISSED), with its summary body.
+type GhReview struct {
+	ID int `yaml:"id,omitempty" json:"id"`
+
+	Author string `yaml:"author,omitempty" json:"author"`
+
+	State string `yaml:"state,omitempty" json:"state"`
+
+	Body string `yaml:"body,omitempty" json:"body"`
+
+	SubmittedAt string `yaml:"submitted_at,omitempty" json:"submitted_at"`
+}
+
+// #GhReviewComment — one INLINE review comment (anchored to a file + line).
+type GhReviewComment struct {
+	ID int `yaml:"id,omitempty" json:"id"`
+
+	Author string `yaml:"author,omitempty" json:"author"`
+
+	Path string `yaml:"path,omitempty" json:"path"`
+
+	Line int `yaml:"line,omitempty" json:"line,omitempty"`
+
+	Side string `yaml:"side,omitempty" json:"side,omitempty"`
+
+	CreatedAt string `yaml:"created_at,omitempty" json:"created_at"`
+
+	Body string `yaml:"body,omitempty" json:"body"`
+
+	// in_reply_to_id is set when this comment replies to another review comment.
+	InReplyToID *int `yaml:"in_reply_to_id,omitempty" json:"in_reply_to_id,omitempty"`
 }
