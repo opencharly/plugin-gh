@@ -2,6 +2,7 @@ package gh
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"strings"
 	"testing"
@@ -167,6 +168,27 @@ func TestAssembleDocument_ProvenanceCachedOnWarmRead(t *testing.T) {
 	}
 	// The immutable blob content read also reports a hit on the second pass only
 	// when included; here includeContent=false so the content read does not run.
+}
+
+// TestAssembleDocument_NoNullLists pins the schema invariant the self-test
+// guards: every REQUIRED list in #GhDocument must serialize as a list (never
+// null), because the served def rejects null. The assembler make()s every slice,
+// so a real document always has [] where a list is required.
+func TestAssembleDocument_NoNullLists(t *testing.T) {
+	c := docServer(t)
+	doc, err := c.AssembleDocument(context.Background(), "o/r", 7, "pr", false)
+	if err != nil {
+		t.Fatalf("AssembleDocument: %v", err)
+	}
+	b, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{`"reviews":null`, `"review_comments":null`, `"files":null`, `"commits":null`, `"comments":null`, `"labels":null`} {
+		if strings.Contains(string(b), forbidden) {
+			t.Fatalf("a required list serialized as null: %s\n%s", forbidden, b)
+		}
+	}
 }
 
 // TestIsBinary pins the binary heuristic (NUL + invalid UTF-8).

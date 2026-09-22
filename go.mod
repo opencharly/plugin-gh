@@ -3,13 +3,13 @@ module github.com/opencharly/plugin-gh
 go 1.26.4
 
 require (
+	cuelang.org/go v0.16.1
 	github.com/opencharly/sdk v0.2026265.2123
 	github.com/opencharly/spec v0.2026265.2108
 	go.yaml.in/yaml/v3 v3.0.4
 )
 
 require (
-	cuelang.org/go v0.16.1 // indirect
 	github.com/alecthomas/kong v1.15.0 // indirect
 	github.com/cockroachdb/apd/v3 v3.2.1 // indirect
 	github.com/emicklei/proto v1.14.3 // indirect

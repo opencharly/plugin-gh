@@ -119,8 +119,14 @@ func selfTest() int {
 		PR: &params.GhPR{
 			HeadSHA: "head", BaseRef: "main", HeadRef: "feat",
 			Additions: 1, ChangedFiles: 1,
-			Commits: []params.GhCommit{{SHA: "s", Message: "m", Author: "a"}},
-			Files:   []params.GhFile{{Path: "a.go", Status: "modified", Patch: "@@", BlobSHA: "b"}},
+			// EVERY required list is populated (even empty), so the sample is a
+			// schema-valid document with no null where the def requires a list —
+			// the same invariant AssembleDocument guarantees by make()-ing every
+			// slice.
+			Commits:        []params.GhCommit{{SHA: "s", Message: "m", Author: "a"}},
+			Files:          []params.GhFile{{Path: "a.go", Status: "modified", Patch: "@@", BlobSHA: "b"}},
+			Reviews:        []params.GhReview{{ID: 1, Author: "r", State: "APPROVED", Body: "ok"}},
+			ReviewComments: []params.GhReviewComment{{ID: 2, Author: "r", Path: "a.go", Body: "nit"}},
 		},
 		FetchedAt:  "f",
 		Provenance: params.GhProvenance{APIBase: "https://api.github.com", TokenSource: "test"},
