@@ -1,6 +1,6 @@
 plugin-gh:
     candy:
-        version: 2026.263.1800
+        version: 2026.265.2200
         description: |-
             The canonical GitHub surface — one implementation of the gh read ops
             (pr_meta, pr_files, pr_diff, pr_commits, pr_thread, head_sha) plus
@@ -22,10 +22,15 @@ plugin-gh:
                 - command:gh
             source: github.com/opencharly/plugin-gh/candy/plugin-gh
         plan:
-            - check: the gh module ships (go.mod + the client + the provider + the schema + the document emitter)
+            # NOTE: this repo's Go module lives at the REPO ROOT (module
+            # github.com/opencharly/plugin-gh) — the tag-trap layout its Go
+            # consumers (plugin-review, plugin-pipeline) require by proxy tag. So
+            # these checks assert only files under the candy dir; the root go.mod
+            # is deliberately NOT asserted here (it is not a candy-dir file).
+            - check: the candy ships its provider package, both cache/document modules, the schema, the generated params, and the out-of-process serve shim
               id: plugin-gh-module-present
               context: [build]
-              command: "test -f go.mod && test -f gh/ghkit.go && test -f gh/cache.go && test -f gh/document.go && test -f plugin.go && test -f document_emit.go && test -f schema/gh.cue"
+              command: "test -f plugin.go && test -f document_emit.go && test -f gh/ghkit.go && test -f gh/cache.go && test -f gh/document.go && test -f params/cue_types_gen.go && test -f schema/gh.cue && test -d cmd/serve"
             - check: the schema declares both the verb input and the document shape
               id: plugin-gh-schema-defs
               context: [build]

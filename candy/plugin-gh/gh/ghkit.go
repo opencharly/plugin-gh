@@ -23,6 +23,7 @@ package gh
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -46,10 +47,6 @@ type Client struct {
 
 // TokenSource reports where the token came from (the evidence packet names it).
 func (c *Client) TokenSource() string { return c.tokenSource }
-
-// SetCache attaches the response cache (New does this; a bare test Client opts
-// in explicitly). Passing nil disables caching.
-func (c *Client) SetCache(rc *responseCache) { c.cache = rc }
 
 // New resolves the token + the API base from the documented layers.
 func New() (*Client, error) {
@@ -176,13 +173,40 @@ func (c *Client) request(ctx context.Context, method, path string, body io.Reade
 	if err != nil {
 		return nil, err
 	}
+	return readResponse(resp, path)
+}
+
+// HTTPError is a non-2xx response, carrying the status so a caller can branch on
+// it (e.g. a 404 probing whether a number is a PR) without string-matching the
+// message. The message still carries the status + body (the diagnostics contract).
+type HTTPError struct {
+	Status int
+	Path   string
+	Body   string
+}
+
+func (e *HTTPError) Error() string {
+	return fmt.Sprintf("gh: %s: HTTP %d: %s", e.Path, e.Status, truncate(e.Body, 300))
+}
+
+// IsNotFound reports whether err is a 404 from the GitHub API — the ONE probe
+// contract an auto-detect branch needs (a number that is not a PR).
+func IsNotFound(err error) bool {
+	var he *HTTPError
+	return errors.As(err, &he) && he.Status == http.StatusNotFound
+}
+
+// readResponse is the ONE bounded-read + non-2xx-surfacing helper every response
+// path shares (R3): it reads the body under the memory bound and returns an
+// HTTPError for any non-2xx. The caller owns closing resp.Body.
+func readResponse(resp *http.Response, path string) ([]byte, error) {
 	defer resp.Body.Close()
 	b, err := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
 	if err != nil {
 		return nil, fmt.Errorf("gh: %s: read: %w", path, err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("gh: %s: HTTP %d: %s", path, resp.StatusCode, truncate(string(b), 300))
+		return nil, &HTTPError{Status: resp.StatusCode, Path: path, Body: string(b)}
 	}
 	return b, nil
 }
@@ -220,16 +244,13 @@ func (c *Client) requestConditional(ctx context.Context, path, accept, ifNoneMat
 	if err != nil {
 		return nil, "", false, err
 	}
-	defer resp.Body.Close()
-	b, err := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
-	if err != nil {
-		return nil, "", false, fmt.Errorf("gh: %s: read: %w", path, err)
-	}
 	if resp.StatusCode == http.StatusNotModified {
+		_ = resp.Body.Close()
 		return nil, resp.Header.Get("ETag"), true, nil
 	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, "", false, fmt.Errorf("gh: %s: HTTP %d: %s", path, resp.StatusCode, truncate(string(b), 300))
+	b, err := readResponse(resp, path)
+	if err != nil {
+		return nil, "", false, err
 	}
 	return b, resp.Header.Get("ETag"), false, nil
 }

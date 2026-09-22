@@ -1,4 +1,4 @@
-version: 2026.263.1800
+version: 2026.252.1500
 discover:
     - path: candy
       recursive: true

@@ -56,9 +56,8 @@ type responseCache struct {
 }
 
 type memoEntry struct {
-	body      []byte
-	validator string
-	fetched   time.Time
+	body    []byte
+	fetched time.Time
 }
 
 // newResponseCache opens the response cache: $CHARLY_GH_CACHE if set, else the
@@ -75,9 +74,8 @@ func newResponseCache() *responseCache {
 // cachedBody is one cached HTTP response: the raw body + the ETag that
 // revalidates it.
 type cachedBody struct {
-	Body   []byte `json:"body"`
-	ETag   string `json:"etag,omitempty"`
-	Varies string `json:"varies,omitempty"`
+	Body []byte `json:"body"`
+	ETag string `json:"etag,omitempty"`
 }
 
 // getCached performs a conditional GET of path and returns the raw body,
@@ -144,13 +142,13 @@ func (c *Client) getCached(ctx context.Context, path, accept string, immutable m
 			Value:     e.Value,
 			Validator: prior.ETag,
 		})
-		c.cache.memoPut(key, prior.Body, prior.ETag)
+		c.cache.memoPut(key, prior.Body)
 		c.cache.recordHit()
 		return prior.Body, true, nil
 	}
 	raw, _ := json.Marshal(cachedBody{Body: b, ETag: etag})
 	c.cache.store.Put(key, cache.Entry{Value: raw, Validator: etag})
-	c.cache.memoPut(key, b, etag)
+	c.cache.memoPut(key, b)
 	return b, false, nil
 }
 
@@ -181,10 +179,10 @@ func (r *responseCache) memoGet(key string) ([]byte, bool) {
 }
 
 // memoPut records a memoized body (best-effort).
-func (r *responseCache) memoPut(key string, body []byte, validator string) {
+func (r *responseCache) memoPut(key string, body []byte) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.memo[key] = memoEntry{body: body, validator: validator, fetched: time.Now()}
+	r.memo[key] = memoEntry{body: body, fetched: time.Now()}
 }
 
 // immutableDigest renders an immutable component set into the cache-key suffix

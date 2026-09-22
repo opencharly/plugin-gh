@@ -110,6 +110,28 @@ func TestAssembleDocument_IssueOmitsPR(t *testing.T) {
 	}
 }
 
+// TestAssembleDocument_AutoDetectSurfacesRealError pins finding 6: in auto-detect
+// mode a NON-404 failure from the PR probe must surface, never silently yield an
+// issue document.
+func TestAssembleDocument_AutoDetectSurfacesRealError(t *testing.T) {
+	c := cachedTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/issues/3"):
+			_, _ = w.Write([]byte(`{"number":3,"title":"I","state":"open","body":"x","html_url":"u","user":{"login":"a"}}`))
+		case strings.HasSuffix(r.URL.Path, "/issues/3/comments"):
+			_, _ = w.Write([]byte(`[]`))
+		case strings.Contains(r.URL.Path, "/pulls/3"):
+			w.WriteHeader(http.StatusInternalServerError) // NOT a 404 — a real failure
+			_, _ = w.Write([]byte(`{"message":"boom"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	})
+	if _, err := c.AssembleDocument(context.Background(), "o/r", 3, "", true); err == nil {
+		t.Fatal("a non-404 probe failure must surface, not yield an issue document")
+	}
+}
+
 // TestAssembleDocument_NoContentWhenDisabled pins include_file_content=false: the
 // file keeps its diff but fetches no content.
 func TestAssembleDocument_NoContentWhenDisabled(t *testing.T) {

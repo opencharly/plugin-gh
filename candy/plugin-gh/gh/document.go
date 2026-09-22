@@ -298,14 +298,21 @@ func (c *Client) AssembleDocument(ctx context.Context, repo string, number int, 
 		return nil, fmt.Errorf("read issue/PR %s#%d: %w", repo, number, err)
 	}
 	wantPR := target == "pr"
-	// Auto-detect: the pulls endpoint 404s for a plain issue; use it as the probe.
+	// Auto-detect: the pulls endpoint 404s for a plain issue — ONLY a 404 means
+	// "not a PR"; any other failure (network, 5xx, auth) is REAL and must surface,
+	// never silently yield an issue document.
 	var prMetaWire *PRMeta
 	if target == "" || wantPR {
 		m, err := c.PRMeta(ctx, repo, number)
-		if err == nil {
+		switch {
+		case err == nil:
 			prMetaWire = m
-		} else if wantPR {
+		case wantPR:
 			return nil, fmt.Errorf("read PR %s#%d: %w", repo, number, err)
+		case IsNotFound(err):
+			// Confirmed an issue, not a PR: the issue document stands.
+		default:
+			return nil, fmt.Errorf("probe whether %s#%d is a PR: %w", repo, number, err)
 		}
 	}
 

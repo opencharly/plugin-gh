@@ -16,8 +16,11 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.26.x"
+      # The Go module is the REPO ROOT (module github.com/opencharly/plugin-gh —
+      # the tag-trap layout the Go consumers require by proxy tag), so the gate
+      # runs at the root and covers every package, including the out-of-process
+      # serve shim now at candy/plugin-gh/cmd/serve.
       - name: gofmt/vet/test
-        working-directory: candy/plugin-gh
         run: |
           gofmt -l . | grep -v '^$' && exit 1 || true
           go vet ./...

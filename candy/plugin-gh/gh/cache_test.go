@@ -103,6 +103,28 @@ func TestImmutable_CachedByComponents(t *testing.T) {
 	}
 }
 
+// TestHTTPError_IsNotFound pins the typed-status contract the PR auto-detect
+// relies on: a 404 is identified without string-matching, and any other non-2xx
+// is NOT a not-found.
+func TestHTTPError_IsNotFound(t *testing.T) {
+	c := cachedTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"message":"Not Found"}`))
+	})
+	err := c.Get(context.Background(), "/repos/o/r/pulls/1", nil)
+	if !IsNotFound(err) {
+		t.Fatalf("a 404 must satisfy IsNotFound, got %v", err)
+	}
+	c2 := cachedTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"message":"boom"}`))
+	})
+	err2 := c2.Get(context.Background(), "/x", nil)
+	if IsNotFound(err2) {
+		t.Fatalf("a 500 must NOT satisfy IsNotFound, got %v", err2)
+	}
+}
+
 // TestGetCached_DecodesIntoOut is a guard that the cached path still decodes.
 func TestGetCached_DecodesIntoOut(t *testing.T) {
 	c := cachedTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
@@ -116,10 +138,13 @@ func TestGetCached_DecodesIntoOut(t *testing.T) {
 	}
 }
 
-// TestResponseCache_ConcurrentSameURLFetchesOnce pins the in-process dedupe
-// expectation loosely: concurrent cold reads of the SAME key must not
-// deadlock (the store's per-key flock serializes them) and all observe the body.
-func TestResponseCache_ConcurrentSameURLFetchesOnce(t *testing.T) {
+// TestResponseCache_ConcurrentSameURLNoDeadlock pins the CONCURRENCY safety of a
+// cold-read stampede on one key: every goroutine must complete and observe the
+// body (the store's atomic publish + the memo's mutex mean no torn read and no
+// deadlock). It deliberately does NOT assert a request count — concurrent cold
+// reads legitimately race past the memo and each fetch; single-flight is the
+// Store.Fill contract (used by the loader), not the mutable-ETag read path.
+func TestResponseCache_ConcurrentSameURLNoDeadlock(t *testing.T) {
 	var requests atomic.Int32
 	c := cachedTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
 		requests.Add(1)
@@ -132,14 +157,13 @@ func TestResponseCache_ConcurrentSameURLFetchesOnce(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			var out map[string]any
-			_ = c.Get(context.Background(), "/same", &out)
+			if err := c.Get(context.Background(), "/same", &out); err != nil {
+				t.Errorf("concurrent read: %v", err)
+			}
 		}()
 	}
 	wg.Wait()
-	// The memo may or may not have collapsed all 8 (they race past the memo); the
-	// assertion is correctness (no deadlock), and that the count is bounded well
-	// below 8 by the store's per-key single-flight.
-	if n := requests.Load(); n > 8 {
-		t.Fatalf("requests = %d, want <= 8", n)
+	if requests.Load() < 1 {
+		t.Fatal("at least one request must be made")
 	}
 }
