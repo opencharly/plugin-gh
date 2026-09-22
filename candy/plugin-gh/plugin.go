@@ -26,7 +26,7 @@ import (
 //go:embed schema/*.cue
 var schemaFS embed.FS
 
-const calver = "2026.263.1800"
+const calver = "2026.265.2200"
 
 func NewProvider() pb.ProviderServer { return &provider{} }
 

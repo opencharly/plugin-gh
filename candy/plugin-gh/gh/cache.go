@@ -193,12 +193,3 @@ func immutableDigest(components map[string]string) string {
 	}
 	return cache.KeyDigest(components)
 }
-
-// invalidate drops every cached response (the `charly cache clear` sweep and the
-// test hook).
-func (r *responseCache) invalidate() {
-	r.mu.Lock()
-	r.memo = map[string]memoEntry{}
-	r.mu.Unlock()
-	_ = r.store.Clear()
-}
