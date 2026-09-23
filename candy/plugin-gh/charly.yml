@@ -14,8 +14,8 @@ plugin-gh:
             the gh hosts.yml auth), targets api.github.com directly (never an
             ambiguous default-host redirect), surfaces the HTTP status + body on
             every non-2xx, and caches every response on the shared charly cache
-            Store (ETag-revalidated for mutable reads, content-addressed for
-            immutable blobs) so unchanged data is never re-fetched.
+            ArtifactStore (ETag-revalidated for mutable reads, content-addressed
+            for immutable blobs) so unchanged data is never re-fetched.
         plugin:
             providers:
                 - verb:gh
