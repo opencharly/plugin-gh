@@ -32,7 +32,7 @@ func docServer(t *testing.T) *Client {
 		case strings.HasSuffix(p, "/pulls/7/files"):
 			_, _ = w.Write([]byte(`[{"filename":"a.go","status":"modified","additions":2,"deletions":1,"patch":"@@ -1 +1 @@\n-a\n+b","sha":"blob1"}]`))
 		case strings.HasSuffix(p, "/pulls/7"):
-			_, _ = w.Write([]byte(`{"title":"T","state":"open","draft":false,"changed_files":1,"head":{"sha":"head1","ref":"feat"},"base":{"ref":"main"}}`))
+			_, _ = w.Write([]byte(`{"title":"T","state":"open","draft":false,"changed_files":1,"additions":12,"deletions":5,"head":{"sha":"head1","ref":"feat"},"base":{"ref":"main"}}`))
 		case strings.HasSuffix(p, "/git/blobs/blob1"):
 			_, _ = w.Write([]byte(`{"content":"cGFja2FnZSBtYWluCg==","encoding":"base64","size":13}`))
 		default:
@@ -80,6 +80,11 @@ func TestAssembleDocument_PRTier1(t *testing.T) {
 	}
 	if doc.PR.HeadSHA != "head1" {
 		t.Fatalf("head_sha = %q", doc.PR.HeadSHA)
+	}
+	// The PR's per-direction line counts must be the API's additions/deletions,
+	// not zero and not a combined sum (the field is REQUIRED in #GhPR).
+	if doc.PR.Additions != 12 || doc.PR.Deletions != 5 {
+		t.Fatalf("additions/deletions = %d/%d, want 12/5", doc.PR.Additions, doc.PR.Deletions)
 	}
 }
 

@@ -87,13 +87,12 @@ func emitDocument(ctx context.Context, client *gh.Client, in params.GhInput) (ma
 }
 
 // validateDocument validates the document against #GhDocument. A nil validator
-// (only possible on a defective embedded schema, which the load gate already
-// rejects) degrades to a pass with a loud stderr line rather than failing the
-// op for a reason unrelated to the read.
+// is a HARD ERROR: R8 requires the artifact be validated BEFORE it is written,
+// so an unvalidated document must never be emitted — the guardrail fails closed,
+// never degrading to a warning.
 func validateDocument(doc *params.GhDocument) error {
 	if documentValidator == nil {
-		fmt.Fprintln(os.Stderr, "gh: WARNING: #GhDocument validator unavailable (embedded schema failed to compile) — emitting unvalidated")
-		return nil
+		return fmt.Errorf("gh: document: #GhDocument validator unavailable (embedded schema failed to compile) — refusing to emit an unvalidated document")
 	}
 	if err := documentValidator.Validate("#GhDocument", doc); err != nil {
 		return fmt.Errorf("gh: document: failed #GhDocument validation: %w", err)

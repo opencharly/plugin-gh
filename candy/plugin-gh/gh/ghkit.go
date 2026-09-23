@@ -313,15 +313,16 @@ func truncate(s string, n int) string {
 // ── the typed read surface (the ops the eval lane's agents consume) ──────
 
 type PRMeta struct {
-	Title      string `json:"title"`
-	State      string `json:"state"`
-	Draft      bool   `json:"draft"`
-	Mergeable  *bool  `json:"mergeable"`
-	HeadSHA    string `json:"head_sha"`
-	Base       string `json:"base"`
-	Head       string `json:"head"`
-	FileCount  int    `json:"file_count"`
-	ChangedSum int    `json:"changed_lines"`
+	Title     string `json:"title"`
+	State     string `json:"state"`
+	Draft     bool   `json:"draft"`
+	Mergeable *bool  `json:"mergeable"`
+	HeadSHA   string `json:"head_sha"`
+	Base      string `json:"base"`
+	Head      string `json:"head"`
+	FileCount int    `json:"file_count"`
+	Additions int    `json:"additions"`
+	Deletions int    `json:"deletions"`
 }
 
 type PRFile struct {
@@ -372,6 +373,8 @@ func (c *Client) PRMeta(ctx context.Context, repo string, pr int) (*PRMeta, erro
 		Draft      bool   `json:"draft"`
 		Mergeable  *bool  `json:"mergeable"`
 		ChangedNum int    `json:"changed_files"`
+		Additions  int    `json:"additions"`
+		Deletions  int    `json:"deletions"`
 		Head       struct {
 			SHA string `json:"sha"`
 			Ref string `json:"ref"`
@@ -383,7 +386,7 @@ func (c *Client) PRMeta(ctx context.Context, repo string, pr int) (*PRMeta, erro
 	if err := c.Get(ctx, fmt.Sprintf("/repos/%s/pulls/%d", repo, pr), &raw); err != nil {
 		return nil, err
 	}
-	m := &PRMeta{Title: raw.Title, State: raw.State, Draft: raw.Draft, Mergeable: raw.Mergeable, HeadSHA: raw.Head.SHA, Base: raw.Base.Ref, Head: raw.Head.Ref, FileCount: raw.ChangedNum}
+	m := &PRMeta{Title: raw.Title, State: raw.State, Draft: raw.Draft, Mergeable: raw.Mergeable, HeadSHA: raw.Head.SHA, Base: raw.Base.Ref, Head: raw.Head.Ref, FileCount: raw.ChangedNum, Additions: raw.Additions, Deletions: raw.Deletions}
 	return m, nil
 }
 

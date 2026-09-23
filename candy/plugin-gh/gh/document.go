@@ -368,7 +368,7 @@ func (c *Client) AssembleDocument(ctx context.Context, repo string, number int, 
 	docPR := &params.GhPR{
 		HeadSHA: prMetaWire.HeadSHA, BaseRef: prMetaWire.Base, HeadRef: prMetaWire.Head,
 		Draft: prMetaWire.Draft, Mergeable: prMetaWire.Mergeable,
-		Additions: prMetaWire.ChangedSum, ChangedFiles: prMetaWire.FileCount,
+		Additions: prMetaWire.Additions, Deletions: prMetaWire.Deletions, ChangedFiles: prMetaWire.FileCount,
 		Commits:        make([]params.GhCommit, len(commits)),
 		Reviews:        make([]params.GhReview, len(reviews)),
 		ReviewComments: make([]params.GhReviewComment, len(reviewComments)),
