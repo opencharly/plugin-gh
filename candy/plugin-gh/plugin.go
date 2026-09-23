@@ -1,12 +1,14 @@
 // Package plugingh — the canonical GitHub surface for opencharly plugins.
 //
-// Provides verb:gh (the check-plan surface: `gh: {op: ..., repo: ..., pr: ...}`)
+// Provides verb:gh (the check-plan surface: `gh: {op: ..., repo: ..., number: ...}`)
 // and command:gh (`charly gh <op> ...`, the standalone CLI). The actual GitHub
 // work lives in gh/ghkit — the ONE client every opencharly plugin imports
 // (R3); this plugin wires it into the charly verb/command registry.
 //
-// SDD: the CUE schema (schema/gh.cue) is the single source for #GhInput;
-// every authored input is validated at load against the served schema.
+// SDD: the CUE schema (schema/gh.cue) is the single source for #GhInput AND
+// #GhDocument. Every authored input is validated at load against the served
+// schema, and the `document` op validates the marshalled document against
+// #GhDocument BEFORE writing it (R8) — the same declaration, two uses.
 package plugingh
 
 import (
@@ -24,13 +26,13 @@ import (
 //go:embed schema/*.cue
 var schemaFS embed.FS
 
-const calver = "2026.252.1500"
+const calver = "2026.265.2200"
 
 func NewProvider() pb.ProviderServer { return &provider{} }
 
 func NewMeta() pb.PluginMetaServer {
 	return sdk.NewMeta(calver, []sdk.ProvidedCapability{
-		{Class: "verb", Word: "gh"},
+		{Class: "verb", Word: "gh", InputDef: "#GhInput"},
 		{Class: "command", Word: "gh"},
 	}, schemaFS)
 }
@@ -81,45 +83,47 @@ func runOp(ctx context.Context, in params.GhInput) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
-	out := map[string]any{"op": in.Op, "repo": in.Repo, "pr": in.Pr}
+	out := map[string]any{"op": in.Op, "repo": in.Repo, "number": in.Number}
 	switch in.Op {
 	case "pr_meta":
-		m, err := client.PRMeta(ctx, in.Repo, in.Pr)
+		m, err := client.PRMeta(ctx, in.Repo, in.Number)
 		if err != nil {
 			return nil, err
 		}
 		out["title"], out["state"], out["draft"], out["head_sha"] = m.Title, m.State, m.Draft, m.HeadSHA
 		out["base"], out["head"], out["file_count"] = m.Base, m.Head, m.FileCount
 	case "pr_files":
-		paths, err := client.PRPaths(ctx, in.Repo, in.Pr)
+		paths, err := client.PRPaths(ctx, in.Repo, in.Number)
 		if err != nil {
 			return nil, err
 		}
 		out["files"] = paths
 	case "pr_diff":
-		d, err := client.PRDiff(ctx, in.Repo, in.Pr)
+		d, err := client.PRDiff(ctx, in.Repo, in.Number)
 		if err != nil {
 			return nil, err
 		}
 		out["diff"] = d
 	case "pr_commits":
-		cs, err := client.PRCommits(ctx, in.Repo, in.Pr)
+		cs, err := client.PRCommits(ctx, in.Repo, in.Number)
 		if err != nil {
 			return nil, err
 		}
 		out["commits"] = cs
 	case "pr_thread":
-		th, err := client.PRThread(ctx, in.Repo, in.Pr)
+		th, err := client.PRThread(ctx, in.Repo, in.Number)
 		if err != nil {
 			return nil, err
 		}
 		out["body"], out["comments"] = th.Body, th.Comments
 	case "head_sha":
-		s, err := client.HeadSHA(ctx, in.Repo, in.Pr)
+		s, err := client.HeadSHA(ctx, in.Repo, in.Number)
 		if err != nil {
 			return nil, err
 		}
 		out["head_sha"] = s
+	case "document":
+		return emitDocument(ctx, client, in)
 	default:
 		return nil, fmt.Errorf("gh: unknown op %q", in.Op)
 	}

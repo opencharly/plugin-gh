@@ -1,23 +1,54 @@
 plugin-gh:
     candy:
-        version: 2026.252.1500
+        version: 2026.265.2200
         description: |-
             The canonical GitHub surface — one implementation of the gh read ops
-            (pr_meta, pr_files, pr_diff, pr_commits, pr_thread, head_sha) as a
-            typed, declarative verb (`gh: {op: ..., repo: ..., pr: ...}`) and the
-            standalone `charly gh` CLI. Replaces every hand-rolled
-            exec.Command("gh") call: the client resolves the token explicitly
-            (GH_TOKEN/GITHUB_TOKEN → the gh hosts.yml auth), targets
-            api.github.com directly (never an ambiguous default-host redirect),
-            and surfaces the HTTP status + body on every non-2xx — no more
-            "gh meta failed" with swallowed stderr.
+            (pr_meta, pr_files, pr_diff, pr_commits, pr_thread, head_sha) plus
+            `document`, which fetches a whole issue OR pull request (body, every
+            comment, every review and inline review comment, the commits, and
+            every changed file's patch AND full content at head) and emits it as
+            a #GhDocument JSON or YAML artifact. Exposed as a typed, declarative
+            verb (`gh: {op: ..., repo: ..., number: ...}`) and the standalone
+            `charly gh` CLI. Replaces every hand-rolled exec.Command("gh") call:
+            the client resolves the token explicitly (GH_TOKEN/GITHUB_TOKEN →
+            the gh hosts.yml auth), targets api.github.com directly (never an
+            ambiguous default-host redirect), surfaces the HTTP status + body on
+            every non-2xx, and caches every response on the shared charly cache
+            ArtifactStore (ETag-revalidated for mutable reads, content-addressed
+            for immutable blobs) so unchanged data is never re-fetched.
         plugin:
             providers:
                 - verb:gh
                 - command:gh
             source: github.com/opencharly/plugin-gh/candy/plugin-gh
         plan:
-            - check: the gh module ships (go.mod + the client + the provider + the schema)
+            # NOTE: this repo's Go module lives at the REPO ROOT (module
+            # github.com/opencharly/plugin-gh) — the tag-trap layout its Go
+            # consumers (plugin-review, plugin-pipeline) require by proxy tag. So
+            # these checks assert only files under the candy dir; the root go.mod
+            # is deliberately NOT asserted here (it is not a candy-dir file).
+            - check: the candy ships its provider package, both cache/document modules, the schema, the generated params, and the out-of-process serve shim
               id: plugin-gh-module-present
               context: [build]
-              command: "test -f go.mod && test -f gh/ghkit.go && test -f plugin.go && test -f schema/gh.cue"
+              command: "test -f plugin.go && test -f document_emit.go && test -f gh/ghkit.go && test -f gh/cache.go && test -f gh/document.go && test -f params/cue_types_gen.go && test -f schema/gh.cue && test -d cmd/serve"
+            - check: the schema declares both the verb input and the document shape
+              id: plugin-gh-schema-defs
+              context: [build]
+              command: "grep -q '#GhInput' schema/gh.cue && grep -q '#GhDocument' schema/gh.cue"
+            - check: the generated params carry the document type (SDD regen is current)
+              id: plugin-gh-params-current
+              context: [build]
+              command: "grep -q 'type GhDocument struct' params/cue_types_gen.go && grep -q 'IncludeFileContent' params/cue_types_gen.go"
+            - check: the response cache is the shared spec/cache ArtifactStore (no hand-rolled cache)
+              id: plugin-gh-shares-cache-store
+              context: [build]
+              command: "grep -q 'opencharly/spec/cache' gh/cache.go && grep -q 'cache.OpenLayout' gh/cache.go"
+            - check: the plugin self-tests green (unit + cache + document assembly)
+              id: plugin-gh-unit-tests
+              context: [build]
+              command: "go test ./..."
+            - check: the embedded #GhDocument schema compiles, validates a sample, and serializes
+              id: plugin-gh-document-self-test
+              context: [runtime]
+              command: "charly gh --self-test"
+              exit_status: 0

@@ -23,21 +23,52 @@ does not reach.
 - **Real diagnostics** — every non-2xx surfaces the HTTP status AND the
   response body; a call that fails with no detail is a defect.
 - **Typed ops** — pr_meta, pr_files (+ the space-separated paths for the
-  pr-apply seam), pr_diff, pr_commits, pr_thread, head_sha.
+  pr-apply seam), pr_diff, pr_commits, pr_thread, head_sha, and **document**.
+- **A shared response cache** — every read goes through the ONE
+  `github.com/opencharly/spec/cache` Store (R3). Mutable reads (PR/issue meta,
+  files, comments, commits, reviews) are ETag-revalidated: unchanged upstream
+  costs a 304, never a body re-fetch. Immutable reads (a git blob by SHA) are
+  content-addressed: a repeat read never touches the network at all. This is not
+  a gh-specific cache — it is the same cache mechanism the loader and the rest
+  of the tree use.
 
 ## Surface
 
 | Class | Word | Shape |
 |---|---|---|
-| verb | `gh` | `gh: {op: pr_meta|pr_files|pr_diff|pr_commits|pr_thread|head_sha, repo: OWNER/NAME, pr: N}` |
-| command | `gh` | `charly gh <op> --repo OWNER/NAME --pr N` |
+| verb | `gh` | `gh: {op: pr_meta\|pr_files\|pr_diff\|pr_commits\|pr_thread\|head_sha\|document, repo: OWNER/NAME, number: N, target?: issue\|pr, format?: json\|yaml, out?: PATH, include_file_content?: bool}` |
+| command | `gh` | `charly gh <op> --repo OWNER/NAME --number N [--target …] [--format …] [--out …]` |
+
+### The `document` op
+
+`gh: {op: document, repo: …, number: …, out: pr.json}` (or
+`charly gh document --repo … --number … --format yaml --out pr.yaml`) assembles a
+whole issue OR pull request into ONE structured artifact — the full body, EVERY
+issue comment, EVERY review and inline review comment, the commits, and every
+changed file's unified patch PLUS its complete content at the head commit. The
+document is validated against the served `#GhDocument` CUE def before it is
+written.
+
+- `target` — `issue` | `pr`; omitted auto-detects (a pull request number yields
+  a PR document, anything else an issue).
+- `format` — `json` (default) or `yaml`.
+- `out` — write the serialized document to this path; omitted returns it inline
+  in the verb result.
+- `include_file_content` — fetch each changed file's full content at head
+  (default **true**; pass `=false` to keep only the diffs). A binary or oversized
+  file is recorded with `is_binary`/`truncated` + `omitted_reason` rather than
+  silently dropped.
 
 The Go client: `github.com/opencharly/plugin-gh/candy/plugin-gh/gh`.
 
 ## Verify
 
 ```
-cd candy/plugin-gh && go test ./...
+cd candy/plugin-gh && go test ./...      # hermetic unit + cache + document tests
+charly gh --self-test                    # offline schema/serialization probe
 ```
 
-*Assisted-by: pi openrouter/deepseek/deepseek-v4-flash-0731 (fully tested and validated)*
+The live GitHub read tests opt in via `GHKIT_LIVE_REPO` (+ a token) and SKIP
+cleanly otherwise (R7a — never a fabricated response).
+
+*Assisted-by: opencode ollama-cloud/deepseek-v4.1-flash (fully tested and validated)*
