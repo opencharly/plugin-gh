@@ -3,13 +3,13 @@ module github.com/opencharly/plugin-gh
 go 1.26.4
 
 require (
-	cuelang.org/go v0.16.1
-	github.com/opencharly/sdk v0.2026265.2123
-	github.com/opencharly/spec v0.2026265.2108
+	github.com/opencharly/sdk v0.2026266.1111
+	github.com/opencharly/spec v0.2026266.1306
 	go.yaml.in/yaml/v3 v3.0.4
 )
 
 require (
+	cuelang.org/go v0.16.1 // indirect
 	github.com/alecthomas/kong v1.15.0 // indirect
 	github.com/cockroachdb/apd/v3 v3.2.1 // indirect
 	github.com/emicklei/proto v1.14.3 // indirect
@@ -23,6 +23,8 @@ require (
 	github.com/mattn/go-isatty v0.0.17 // indirect
 	github.com/mitchellh/go-wordwrap v1.0.1 // indirect
 	github.com/oklog/run v1.1.0 // indirect
+	github.com/opencontainers/go-digest v1.0.0 // indirect
+	github.com/opencontainers/image-spec v1.1.1 // indirect
 	github.com/pelletier/go-toml/v2 v2.2.4 // indirect
 	github.com/protocolbuffers/txtpbfmt v0.0.0-20260217160748-a481f6a22f94 // indirect
 	golang.org/x/net v0.57.0 // indirect

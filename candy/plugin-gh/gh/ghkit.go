@@ -40,7 +40,7 @@ type Client struct {
 	Token       string
 	tokenSource string
 	HTTP        *http.Client
-	// cache is the HTTP response cache (the shared spec/cache.Store). nil only on
+	// cache is the HTTP response cache (the shared spec/cache ArtifactStore). nil only on
 	// a Client built directly by a test that wants to bypass caching.
 	cache *responseCache
 }

@@ -1,9 +1,9 @@
 package gh
 
 // cache.go — the gh client's HTTP response cache, on the ONE shared
-// spec/cache.Store (R3). No gh-specific cache mechanism: the plugin reuses the
-// same content-addressed / revalidating Store the loader and every other cache
-// in the tree use.
+// spec/cache ArtifactStore (R3). No gh-specific cache mechanism: the plugin reuses
+// the same content-addressed / revalidating ArtifactStore the loader and every
+// other cache in the tree use.
 //
 // Two upstream classes, two validity modes:
 //
@@ -42,11 +42,11 @@ const CacheTTL = time.Minute
 // dir; operators can point it anywhere), mirroring CHARLY_REPO_CACHE.
 const cacheEnvName = "CHARLY_GH_CACHE"
 
-// responseCache is the per-client HTTP response cache: one shared Store plus an
-// in-process memo (URL → cached body) so repeat reads in ONE process avoid even
-// the ETag round-trip.
+// responseCache is the per-client HTTP response cache: one shared ArtifactStore
+// plus an in-process memo (URL → cached body) so repeat reads in ONE process
+// avoid even the ETag round-trip.
 type responseCache struct {
-	store *cache.Store
+	store *cache.Layout
 
 	mu   sync.Mutex
 	memo map[string]memoEntry
@@ -66,9 +66,9 @@ type memoEntry struct {
 // without error — the cache is an optimization.
 func newResponseCache() *responseCache {
 	if dir := os.Getenv(cacheEnvName); dir != "" {
-		return &responseCache{store: cache.Open(dir), memo: map[string]memoEntry{}}
+		return &responseCache{store: cache.OpenLayout(dir), memo: map[string]memoEntry{}}
 	}
-	return &responseCache{store: cache.OpenNamed("gh-http"), memo: map[string]memoEntry{}}
+	return &responseCache{store: cache.OpenNamedLayout("gh-http"), memo: map[string]memoEntry{}}
 }
 
 // cachedBody is one cached HTTP response: the raw body + the ETag that
@@ -112,7 +112,7 @@ func (c *Client) getCached(ctx context.Context, path, accept string, immutable m
 			return nil, false, err
 		}
 		raw, _ := json.Marshal(cachedBody{Body: b})
-		c.cache.store.Put(key, cache.Entry{Value: raw, Components: immutable})
+		c.cache.store.Put(key, cache.Entry{Payload: raw, Components: immutable})
 		return b, false, nil
 	}
 
@@ -139,7 +139,7 @@ func (c *Client) getCached(ctx context.Context, path, accept string, immutable m
 	}
 	if notModified {
 		c.cache.store.Put(key, cache.Entry{
-			Value:     e.Value,
+			Payload:   e.Payload,
 			Validator: prior.ETag,
 		})
 		c.cache.memoPut(key, prior.Body)
@@ -147,7 +147,7 @@ func (c *Client) getCached(ctx context.Context, path, accept string, immutable m
 		return prior.Body, true, nil
 	}
 	raw, _ := json.Marshal(cachedBody{Body: b, ETag: etag})
-	c.cache.store.Put(key, cache.Entry{Value: raw, Validator: etag})
+	c.cache.store.Put(key, cache.Entry{Payload: raw, Validator: etag})
 	c.cache.memoPut(key, b)
 	return b, false, nil
 }
