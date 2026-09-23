@@ -39,10 +39,10 @@ plugin-gh:
               id: plugin-gh-params-current
               context: [build]
               command: "grep -q 'type GhDocument struct' params/cue_types_gen.go && grep -q 'IncludeFileContent' params/cue_types_gen.go"
-            - check: the response cache is the shared spec/cache Store (no hand-rolled cache)
+            - check: the response cache is the shared spec/cache ArtifactStore (no hand-rolled cache)
               id: plugin-gh-shares-cache-store
               context: [build]
-              command: "grep -q 'opencharly/spec/cache' gh/cache.go && grep -q 'cache.Open' gh/cache.go"
+              command: "grep -q 'opencharly/spec/cache' gh/cache.go && grep -q 'cache.OpenLayout' gh/cache.go"
             - check: the plugin self-tests green (unit + cache + document assembly)
               id: plugin-gh-unit-tests
               context: [build]
