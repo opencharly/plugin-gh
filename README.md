@@ -25,7 +25,8 @@ does not reach.
 - **Typed ops** — pr_meta, pr_files (+ the space-separated paths for the
   pr-apply seam), pr_diff, pr_commits, pr_thread, head_sha, and **document**.
 - **A shared response cache** — every read goes through the ONE
-  `github.com/opencharly/spec/cache` Store (R3). Mutable reads (PR/issue meta,
+  `github.com/opencharly/spec/cache` **ArtifactStore** (an OCI Image Layout,
+  R3). Mutable reads (PR/issue meta,
   files, comments, commits, reviews) are ETag-revalidated: unchanged upstream
   costs a 304, never a body re-fetch. Immutable reads (a git blob by SHA) are
   content-addressed: a repeat read never touches the network at all. This is not
