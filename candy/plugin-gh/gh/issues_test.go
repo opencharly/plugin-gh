@@ -54,14 +54,17 @@ func TestListIssues_OrgScope(t *testing.T) {
 	}
 }
 
-// TestListIssues_RepoScope pins the repo-scoped path (the SAME implementation,
-// a different request path) and the kind client-side filter: an org listing has
-// no server-side issue-only filter, so kind=pr keeps only the PR rows.
+// TestListIssues_RepoScopeAndKindFilter pins the repo-scoped path (the SAME
+// implementation, a different request path), the kind client-side filter, and
+// the repo-slug fallback: the REAL repo endpoint has NO `repository` object
+// (verified against api.github.com), so the row's repo comes from the requested
+// slug — not from a fabricated `repository.full_name`.
 func TestListIssues_RepoScopeAndKindFilter(t *testing.T) {
 	var gotPath string
+	// The real /repos/{owner}/{repo}/issues row shape: no `repository` object.
 	body := `[
-		{"number":1,"repository":{"full_name":"o/r"}},
-		{"number":2,"repository":{"full_name":"o/r"},"pull_request":{"merged_at":null}}
+		{"number":1},
+		{"number":2,"pull_request":{"merged_at":null}}
 	]`
 	c := cachedTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
@@ -79,6 +82,9 @@ func TestListIssues_RepoScopeAndKindFilter(t *testing.T) {
 	}
 	if idx.Count != 1 || idx.Items[0].Kind != "pr" || idx.Items[0].Number != 2 {
 		t.Fatalf("kind=pr must keep only the PR row: %+v", idx.Items)
+	}
+	if idx.Items[0].Repo != "o/r" {
+		t.Fatalf("a repo listing must fill the row repo from the requested slug, got %q", idx.Items[0].Repo)
 	}
 }
 

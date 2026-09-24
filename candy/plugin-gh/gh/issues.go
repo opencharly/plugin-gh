@@ -123,7 +123,7 @@ func (c *Client) ListIssues(ctx context.Context, org, repo, state, kind, since s
 			if limit > 0 && len(idx.Items) >= limit {
 				break
 			}
-			idx.Items = append(idx.Items, c.toIssueRef(r, isPR, includeBody))
+			idx.Items = append(idx.Items, c.toIssueRef(r, isPR, includeBody, repo))
 		}
 		// Report done at the PAGE level, AFTER the row loop: when `limit` has been
 		// reached the walk must stop HERE — checking inside the loop alone would
@@ -143,11 +143,17 @@ func (c *Client) ListIssues(ctx context.Context, org, repo, state, kind, since s
 }
 
 // toIssueRef converts one API row into a #GhIssueRef. The repo comes from the
-// STRUCTURED repository.full_name (an org listing spans repos) — never parsed
-// from a URL.
-func (c *Client) toIssueRef(r issueRow, isPR, includeBody bool) params.GhIssueRef {
+// STRUCTURED repository.full_name when present — the ORG endpoint returns it (an
+// org listing spans repos) — else from the requested repo slug, because the
+// REPO endpoint (/repos/{owner}/{repo}/issues) does NOT include a `repository`
+// object at all (verified against api.github.com). Never parsed from a URL.
+func (c *Client) toIssueRef(r issueRow, isPR, includeBody bool, requestedRepo string) params.GhIssueRef {
+	repo := r.Repository.FullName
+	if repo == "" {
+		repo = requestedRepo
+	}
 	ref := params.GhIssueRef{
-		Kind: "issue", Repo: r.Repository.FullName, Number: r.Number,
+		Kind: "issue", Repo: repo, Number: r.Number,
 		Title: r.Title, State: r.State, Author: orUnknown(r.User.Login),
 		CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt, URL: r.HTMLURL,
 		CommentCount: r.Comments,

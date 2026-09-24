@@ -56,8 +56,13 @@ gh-issues-repo:
               context:
                 - runtime
               stdout:
+                # Each assertion proves a REAL /issues row field end-to-end:
+                # the scope, the pull_request marker → kind=pr, the STRUCTURED
+                # repository.full_name → repo, and the top-level draft field.
                 - contains: 'repo:opencharly/plugin-gh'
                 - contains: '"kind":"pr"'
+                - contains: '"repo":"opencharly/plugin-gh"'
+                - contains: '"draft":'
               exit_status: 0
             - check: a second identical listing is served from the response cache (provenance.cached=true)
               id: gh-issues-repo-cache-warm
@@ -100,6 +105,9 @@ gh-issues-org:
                 - runtime
               stdout:
                 - contains: 'org:opencharly'
+                # Proves the STRUCTURED repository.full_name → repo mapping on an
+                # org listing (which spans repos) END-TO-END in live output.
+                - contains: '"repo":"opencharly/'
               exit_status: 0
             - check: an org-wide state=all listing walks the Link header across MANY pages to a full index
               id: gh-issues-org-multipage
