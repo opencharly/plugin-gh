@@ -56,7 +56,7 @@ type responseCache struct {
 }
 
 type memoEntry struct {
-	body    []byte
+	body    cachedBody
 	fetched time.Time
 }
 
@@ -72,14 +72,17 @@ func newResponseCache() *responseCache {
 }
 
 // cachedBody is one cached HTTP response: the raw body + the ETag that
-// revalidates it.
+// revalidates it + the rel="next" Link target (empty at the last page). The
+// next-link rides the entry so a warm paginated listing replays the WHOLE page
+// set from cache without a single request.
 type cachedBody struct {
 	Body []byte `json:"body"`
 	ETag string `json:"etag,omitempty"`
+	Next string `json:"next,omitempty"`
 }
 
-// getCached performs a conditional GET of path and returns the raw body,
-// serving from cache when valid:
+// getCached performs a conditional GET of path and returns the raw body and the
+// rel="next" Link target ("", at the last page), serving from cache when valid:
 //
 //   - in-process memo hit within CacheTTL → body, no request.
 //   - persisted entry within CacheTTL → body, no request.
@@ -90,10 +93,12 @@ type cachedBody struct {
 // immutable keys the entry by its content coordinate (sha) and skips the TTL and
 // the revalidation entirely — an immutable resource never changes. The accept
 // header selects the media type (the diff/media variants).
-func (c *Client) getCached(ctx context.Context, path, accept string, immutable map[string]string) ([]byte, bool, error) {
+func (c *Client) getCached(ctx context.Context, path, accept string, immutable map[string]string) ([]byte, string, bool, error) {
 	if c.cache == nil {
-		b, err := c.request(ctx, "GET", path, nil, false, accept)
-		return b, false, err
+		// Cache disabled (a test Client built directly): a plain conditional GET
+		// still yields the body + the rel="next" link so pagination works.
+		b, _, next, _, err := c.requestConditional(ctx, path, accept, "")
+		return b, next, false, err
 	}
 	// The accept header participates in the key: the same path serves a JSON body
 	// or a raw diff under different media types.
@@ -104,22 +109,22 @@ func (c *Client) getCached(ctx context.Context, path, accept string, immutable m
 			var cb cachedBody
 			if e.Decode(&cb) {
 				c.cache.recordHit()
-				return cb.Body, true, nil
+				return cb.Body, cb.Next, true, nil
 			}
 		}
 		b, err := c.request(ctx, "GET", path, nil, false, accept)
 		if err != nil {
-			return nil, false, err
+			return nil, "", false, err
 		}
 		raw, _ := json.Marshal(cachedBody{Body: b})
 		c.cache.store.Put(key, cache.Entry{Payload: raw, Components: immutable})
-		return b, false, nil
+		return b, "", false, nil
 	}
 
 	// Mutable: memo, then TTL, then ETag revalidation.
-	if b, ok := c.cache.memoGet(key); ok {
+	if cb, ok := c.cache.memoGet(key); ok {
 		c.cache.recordHit()
-		return b, true, nil
+		return cb.Body, cb.Next, true, nil
 	}
 	e, present := c.cache.store.Get(key)
 	var prior cachedBody
@@ -128,28 +133,27 @@ func (c *Client) getCached(ctx context.Context, path, accept string, immutable m
 	}
 	if present && e.FreshTTL(CacheTTL) && len(prior.Body) > 0 {
 		c.cache.recordHit()
-		return prior.Body, true, nil
+		return prior.Body, prior.Next, true, nil
 	}
 
 	// Revalidate (or fetch fresh). A 304 means unchanged: keep the body,
 	// refresh the resolution time, and memo it.
-	b, etag, notModified, err := c.requestConditional(ctx, path, accept, prior.ETag)
+	b, etag, next, notModified, err := c.requestConditional(ctx, path, accept, prior.ETag)
 	if err != nil {
-		return nil, false, err
+		return nil, "", false, err
 	}
 	if notModified {
-		c.cache.store.Put(key, cache.Entry{
-			Payload:   e.Payload,
-			Validator: prior.ETag,
-		})
-		c.cache.memoPut(key, prior.Body)
+		// A 304 carries no body AND no Link header; keep the prior (cached) next
+		// link so the surrounding pagination still walks the cached page set.
+		c.cache.store.Put(key, cache.Entry{Payload: e.Payload, Validator: prior.ETag})
+		c.cache.memoPutBody(key, prior)
 		c.cache.recordHit()
-		return prior.Body, true, nil
+		return prior.Body, prior.Next, true, nil
 	}
-	raw, _ := json.Marshal(cachedBody{Body: b, ETag: etag})
+	raw, _ := json.Marshal(cachedBody{Body: b, ETag: etag, Next: next})
 	c.cache.store.Put(key, cache.Entry{Payload: raw, Validator: etag})
-	c.cache.memoPut(key, b)
-	return b, false, nil
+	c.cache.memoPutBody(key, cachedBody{Body: b, Next: next})
+	return b, next, false, nil
 }
 
 // recordHit notes that a response was served from cache (the provenance flag).
@@ -167,22 +171,22 @@ func (r *responseCache) hitsSince() int {
 	return r.hits
 }
 
-// memoGet returns a memoized body within the TTL.
-func (r *responseCache) memoGet(key string) ([]byte, bool) {
+// memoGet returns a memoized response within the TTL.
+func (r *responseCache) memoGet(key string) (cachedBody, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	m, ok := r.memo[key]
 	if !ok || time.Since(m.fetched) > CacheTTL {
-		return nil, false
+		return cachedBody{}, false
 	}
 	return m.body, true
 }
 
-// memoPut records a memoized body (best-effort).
-func (r *responseCache) memoPut(key string, body []byte) {
+// memoPutBody records a memoized response (best-effort).
+func (r *responseCache) memoPutBody(key string, cb cachedBody) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.memo[key] = memoEntry{body: body, fetched: time.Now()}
+	r.memo[key] = memoEntry{body: cb, fetched: time.Now()}
 }
 
 // immutableDigest renders an immutable component set into the cache-key suffix

@@ -9,16 +9,28 @@
 //     output contract is the same declaration the docs publish.
 
 // #GhInput — the verb input. `op` selects the read; the document op adds the
-// target/format/out/include_file_content knobs.
+// target/format/out/include_file_content knobs, and the issues op adds the
+// org/state/kind/since/limit/include_body list knobs.
+//
+// FLAT, not per-op-discriminated: a CUE `if`/disjunction on `op` degrades
+// `cue exp gengotypes` to `any` (RDD-proven), so — exactly like #AppiumInput —
+// the schema is one flat struct and the provider enforces the per-op
+// requirements at runtime (repo+number for the reads, org-or-repo for issues).
 #GhInput: {
 	// op — the read to run. The first six are the original PR reads; `document`
-	// assembles the full structured issue/PR artifact.
-	op: "pr_meta" | "pr_files" | "pr_diff" | "pr_commits" | "pr_thread" | "head_sha" | "document" @go(Op)
-	// repo — the FULL slug (owner/name) — e.g. omacom/omarchy
-	repo: string @go(Repo)
+	// assembles the full structured issue/PR artifact; `issues` lists a repo's or
+	// an org's issues AND pull requests as a compact index.
+	op: "pr_meta" | "pr_files" | "pr_diff" | "pr_commits" | "pr_thread" | "head_sha" | "document" | "issues" @go(Op)
+	// repo — the FULL slug (owner/name) — e.g. omacom/omarchy. Required for the
+	// single-item reads and for a repo-scoped `issues` list; omitted for an
+	// org-scoped `issues` list.
+	repo?: string @go(Repo)
+	// org — the org login (e.g. opencharly). Required for an org-scoped `issues`
+	// list (one request returns every open issue+PR across the whole org).
+	org?: string @go(Org)
 	// number — the issue OR pull-request number (renamed from `pr`: the document
 	// op addresses issues too, and `pr` mis-described an issue read).
-	number: int & >0 @go(Number,type=int)
+	number?: int & >0 @go(Number,type=int)
 	// target — document only: which artifact to assemble. Omitted auto-detects
 	// (a pull request number yields a PR document; anything else an issue).
 	target?: "issue" | "pr" @go(Target)
@@ -32,6 +44,20 @@
 	// A pointer so omission (nil) means the DEFAULT (true) while an explicit false
 	// disables it; a binary or oversized file is recorded with omitted_reason.
 	include_file_content?: bool @go(IncludeFileContent,type=*bool)
+	// state — issues only: the state filter (default open).
+	state?: "open" | "closed" | "all" @go(State,type=string)
+	// kind — issues only: filter to issues, pull requests, or both (default all).
+	// GitHub has no server-side issue-only filter here, so this is applied
+	// client-side off the `pull_request` marker.
+	kind?: "issue" | "pr" | "all" @go(Kind,type=string)
+	// since — issues only: only items updated at/after this RFC3339 timestamp
+	// (the incremental-refresh knob; also narrows an ETag-keyed page set).
+	since?: string @go(Since)
+	// limit — issues only: stop after this many items (0/omitted = all).
+	limit?: int & >=0 @go(Limit,type=int)
+	// include_body — issues only: include each item's body in the index (larger;
+	// default false — the index is a compact listing).
+	include_body?: bool @go(IncludeBody,type=*bool)
 }
 
 // #GhDocument — the structured issue/PR artifact. EVERY comment surface is
@@ -148,4 +174,50 @@
 	// cached is true when the document assembly served at least one response
 	// from the local cache without re-fetching the body.
 	cached: bool @go(Cached)
+}
+
+// #GhIssueIndex — the compact listing the `issues` op emits: every open (or
+// closed/all) issue AND pull request for a repo or an org, as lightweight rows
+// a caller turns into documents or a review queue WITHOUT a per-item fetch. The
+// pull-request rows carry the PR-only fields (head_sha/draft/base_ref/head_ref)
+// so a caller can detect a moved PR without reading it; `document` is the op
+// that then fetches one row in full.
+#GhIssueIndex: {
+	scope:   string @go(Scope) // "org:<login>" | "repo:<owner/name>"
+	state:   string @go(State) // the requested state filter (open|closed|all)
+	kind:    string @go(Kind)  // the requested kind filter (issue|pr|all)
+	count:   int             @go(Count,type=int)
+	items:   [...#GhIssueRef] @go(Items)
+	// fetched_at is when the index was assembled.
+	fetched_at: string         @go(FetchedAt)
+	provenance: #GhProvenance @go(Provenance)
+}
+
+// #GhIssueRef — one row in the index: the issue/PR identity plus the cheap
+// signals a queue needs. body is present only when include_body is set.
+#GhIssueRef: {
+	kind:        string @go(Kind) // "issue" | "pr"
+	repo:        string @go(Repo) // the FULL slug (the org list spans repos)
+	number:      int    @go(Number,type=int)
+	title:       string @go(Title)
+	state:       string @go(State)
+	author:      string @go(Author)
+	created_at:  string @go(CreatedAt)
+	updated_at:  string @go(UpdatedAt)
+	url:         string @go(URL)
+	labels:      [...string] @go(Labels)
+	comment_count: int @go(CommentCount,type=int)
+	// pr is present iff kind == "pr" (the cheap PR signals).
+	pr?: #GhIssueRefPR @go(PR,type=*GhIssueRefPR)
+	// body is present only when include_body was requested.
+	body?: string @go(Body)
+}
+
+// #GhIssueRefPR — the cheap pull-request signals carried on an index row (not a
+// full PR document — use the document op for that).
+#GhIssueRefPR: {
+	head_sha: string @go(HeadSHA)
+	base_ref: string @go(BaseRef)
+	head_ref: string @go(HeadRef)
+	draft:    bool   @go(Draft)
 }

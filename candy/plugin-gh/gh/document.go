@@ -113,7 +113,7 @@ func (c *Client) Issue(ctx context.Context, repo string, number int) (*Issue, er
 // PRReviews lists every submitted review on a PR, paginated to completion.
 func (c *Client) PRReviews(ctx context.Context, repo string, pr int) ([]Review, error) {
 	var out []Review
-	err := c.getAll(ctx, fmt.Sprintf("/repos/%s/pulls/%d/reviews", repo, pr), func(b []byte) (int, error) {
+	err := c.getAll(ctx, fmt.Sprintf("/repos/%s/pulls/%d/reviews", repo, pr), func(b []byte) (int, bool, error) {
 		var page []struct {
 			ID   int `json:"id"`
 			User struct {
@@ -124,7 +124,7 @@ func (c *Client) PRReviews(ctx context.Context, repo string, pr int) ([]Review, 
 			SubmittedAt string `json:"submitted_at"`
 		}
 		if err := json.Unmarshal(b, &page); err != nil {
-			return 0, err
+			return 0, false, err
 		}
 		for _, r := range page {
 			author := r.User.Login
@@ -133,7 +133,7 @@ func (c *Client) PRReviews(ctx context.Context, repo string, pr int) ([]Review, 
 			}
 			out = append(out, Review{ID: r.ID, Author: author, State: r.State, Body: r.Body, SubmittedAt: r.SubmittedAt})
 		}
-		return len(page), nil
+		return len(page), false, nil
 	})
 	if err != nil {
 		return nil, err
@@ -145,7 +145,7 @@ func (c *Client) PRReviews(ctx context.Context, repo string, pr int) ([]Review, 
 // completion (the per-file/hunk comments, distinct from the issue comments).
 func (c *Client) PRReviewComments(ctx context.Context, repo string, pr int) ([]ReviewComment, error) {
 	var out []ReviewComment
-	err := c.getAll(ctx, fmt.Sprintf("/repos/%s/pulls/%d/comments", repo, pr), func(b []byte) (int, error) {
+	err := c.getAll(ctx, fmt.Sprintf("/repos/%s/pulls/%d/comments", repo, pr), func(b []byte) (int, bool, error) {
 		var page []struct {
 			ID   int `json:"id"`
 			User struct {
@@ -159,7 +159,7 @@ func (c *Client) PRReviewComments(ctx context.Context, repo string, pr int) ([]R
 			InReplyToID int    `json:"in_reply_to_id"`
 		}
 		if err := json.Unmarshal(b, &page); err != nil {
-			return 0, err
+			return 0, false, err
 		}
 		for _, rc := range page {
 			author := rc.User.Login
@@ -171,7 +171,7 @@ func (c *Client) PRReviewComments(ctx context.Context, repo string, pr int) ([]R
 				CreatedAt: rc.CreatedAt, Body: rc.Body, InReplyToID: rc.InReplyToID,
 			})
 		}
-		return len(page), nil
+		return len(page), false, nil
 	})
 	if err != nil {
 		return nil, err

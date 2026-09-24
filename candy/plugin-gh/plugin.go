@@ -15,6 +15,7 @@ import (
 	"context"
 	"embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"github.com/opencharly/plugin-gh/candy/plugin-gh/gh"
@@ -91,6 +92,13 @@ func runVerb(req *pb.InvokeRequest) (*pb.InvokeReply, error) {
 	var in params.GhInput
 	kit.DecodeInput(op.PluginInput, &in)
 	result, err := runOp(context.Background(), in)
+	// A skipError (an op whose endpoint needs an absent credential) is reported
+	// as a host-visible SKIP, never a failure and never a silent pass — the
+	// "live or skip" contract.
+	var sk *skipError
+	if errors.As(err, &sk) {
+		return sdk.ResultJSON("skip", sk.Error())
+	}
 	var out string
 	if err == nil {
 		b, merr := json.Marshal(result)
@@ -150,6 +158,8 @@ func runOp(ctx context.Context, in params.GhInput) (map[string]any, error) {
 		out["head_sha"] = s
 	case "document":
 		return emitDocument(ctx, client, in)
+	case "issues":
+		return emitIssues(ctx, client, in)
 	default:
 		return nil, fmt.Errorf("gh: unknown op %q", in.Op)
 	}
