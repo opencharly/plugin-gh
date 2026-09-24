@@ -1,4 +1,124 @@
-version: 2026.252.1500
+# Makes this plugin repo a PROJECT so its own candy is gated.
+#
+# Without a root charly.yml the repo is "project-less": charly scans NO candies,
+# so `charly box validate` exits 0 on ANY manifest — including one with a
+# malformed `plugin.providers` entry. Declaring discover: scans the candy, so the
+# CUE schema gate + the stock validate step apply. This file also declares the
+# R10 witness beds (below).
+version: 2026.261.1747
 discover:
     - path: candy
       recursive: true
+
+# =============================================================================
+# gh-issues-app / gh-issues-repo / gh-issues-org — the R10 witness for the
+# `issues` list op (repo- OR org-scoped) and the Link-header pagination the
+# ghkit client now uses. Both beds compose THIS checkout's candy (no @github
+# pin), so they exercise the plugin under test.
+#
+#   - gh-issues-repo runs the WHOLE sequence (build -> check -> deploy -> check
+#     live -> fresh rebuild -> teardown) and needs NO credential: a repo-scoped
+#     /repos/{owner}/{repo}/issues listing is public. It asserts the compact
+#     index shape (scope, count, per-row repo/kind) and, on the post-rebuild
+#     check-live pass, that the second listing comes back cache-warm (the
+#     per-page ETag revalidation) — the cache-efficiency claim, proven live.
+#
+#   - gh-issues-org is the ORG-WIDE fetch the requirement names: ONE paginated
+#     call to /orgs/{org}/issues returns every open issue+PR across the org. That
+#     endpoint REQUIRES authentication (it answers 401 unauthenticated), so the
+#     op returns a host-visible SKIP when no GH_TOKEN/GITHUB_TOKEN is present —
+#     never a fake, never a silent pass (the "live or skip" contract). When a
+#     token IS present the bed fetches the real org listing.
+# =============================================================================
+gh-issues-app:
+    local:
+        description: |-
+            Minimal kind:local template for the gh issues R10 beds — composes the
+            local plugin-gh candy (no install content) so the beds exercise the
+            repo-/org-scoped `issues` list op + the Link-header pagination.
+        candy:
+            - plugin-gh
+gh-issues-repo:
+    local:
+        from: gh-issues-app
+        host: local
+        disposable: true
+        lifecycle: dev
+        description: >-
+            R10 witness for the repo-scoped `issues` op, the `pr_commits` pagination, and the cache. The repo listing (public, no credential) proves the compact index + PR-marker mapping; a second identical step proves the repeat listing is served entirely from the per-page ETag cache (provenance.cached=true). The `pr_commits` step exercises the formerly-single-page commits read against a real PR.
+        plan:
+            - check: the repo-scoped issues op returns a compact index of the repo's issues AND pull requests
+              id: gh-issues-repo-shape
+              gh:
+                op: issues
+                repo: opencharly/plugin-gh
+                state: all
+              context:
+                - runtime
+              stdout:
+                # Each assertion proves a REAL /issues row field end-to-end:
+                # the scope, the pull_request marker → kind=pr, the STRUCTURED
+                # repository.full_name → repo, and the top-level draft field.
+                - contains: 'repo:opencharly/plugin-gh'
+                - contains: '"kind":"pr"'
+                - contains: '"repo":"opencharly/plugin-gh"'
+                - contains: '"draft":'
+              exit_status: 0
+            - check: a second identical listing is served from the response cache (provenance.cached=true)
+              id: gh-issues-repo-cache-warm
+              gh:
+                op: issues
+                repo: opencharly/plugin-gh
+                state: all
+              context:
+                - runtime
+              stdout:
+                - contains: '"cached":true'
+              exit_status: 0
+            - check: the pr_commits op returns a PR's commits (the paginated commits read)
+              id: gh-prcommits-paged
+              gh:
+                op: pr_commits
+                repo: opencharly/plugin-gh
+                number: 4
+              context:
+                - runtime
+              stdout:
+                - contains: 'commits'
+              exit_status: 0
+gh-issues-org:
+    local:
+        from: gh-issues-app
+        host: local
+        disposable: true
+        lifecycle: dev
+        description: >-
+            R10 witness for the ORG-WIDE fetch: `gh: {op: issues, org: opencharly, kind: all}` lists every open issue AND pull request across the whole org in ONE paginated call to /orgs/{org}/issues (filter=all — the endpoint defaults to filter=assigned, which would under-list). That endpoint requires authentication, so when no GH_TOKEN/GITHUB_TOKEN is present the op reports a host-visible SKIP (never a fabricated listing); with a token the bed asserts the real org index. The state=all step forces a genuinely MULTI-PAGE Link-header walk (the org's full history spans dozens of pages) so the new pagination branch runs LIVE, not only under a hermetic stub. The bed is credential-gated to respect the "live or skip" contract.
+        plan:
+            - check: the org-wide issues op lists the whole org as one compact index
+              id: gh-issues-org-shape
+              gh:
+                op: issues
+                org: opencharly
+                kind: all
+              context:
+                - runtime
+              stdout:
+                - contains: 'org:opencharly'
+                # Proves the STRUCTURED repository.full_name → repo mapping on an
+                # org listing (which spans repos) END-TO-END in live output.
+                - contains: '"repo":"opencharly/'
+              exit_status: 0
+            - check: an org-wide state=all listing walks the Link header across MANY pages to a full index
+              id: gh-issues-org-multipage
+              gh:
+                op: issues
+                org: opencharly
+                state: all
+                kind: all
+              context:
+                - runtime
+              stdout:
+                - contains: 'org:opencharly'
+                - contains: '"count":'
+              exit_status: 0

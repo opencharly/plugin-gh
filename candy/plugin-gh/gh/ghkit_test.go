@@ -18,6 +18,19 @@ func testClient(t *testing.T, handler http.HandlerFunc) *Client {
 	return &Client{BaseURL: srv.URL, Token: "test-token", HTTP: srv.Client()}
 }
 
+// linkNext writes the Link header GitHub emits iff there IS a next page —
+// `rel="next"` pointing at the same query with page=N. Modeling this in the
+// stubs is load-bearing: pagination follows rel="next" and ONLY rel="next", so
+// a stub that omits it makes its list look single-page (the defect the old
+// page-count stubs papered over).
+func linkNext(w http.ResponseWriter, r *http.Request, page int) {
+	u := *r.URL
+	q := u.Query()
+	q.Set("page", itoa(page))
+	u.RawQuery = q.Encode()
+	w.Header().Set("Link", `<http://`+r.Host+u.RequestURI()+`>; rel="next"`)
+}
+
 func TestGet_Non2xxSurfacesStatusAndBody(t *testing.T) {
 	c := testClient(t, func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -129,7 +142,9 @@ func TestPRFiles_PerFilePatchAndPagination(t *testing.T) {
 			_, _ = w.Write([]byte(`[{"filename":"big.go","status":"modified","additions":50,"deletions":1,"patch":"@@ -1 +1 @@\n-old\n+new"}]`))
 			return
 		}
-		// page 1: exactly 100 rows so the pager must continue
+		// page 1: exactly 100 rows AND a rel="next" Link (GitHub emits the Link
+		// header iff there is a next page) so the pager must continue.
+		linkNext(w, r, 2)
 		rows := make([]string, 100)
 		for i := range rows {
 			rows[i] = `{"filename":"f` + itoa(i) + `.go","status":"modified","additions":1,"deletions":0,"patch":"@@ -1 +1 @@\n-a\n+b"}`
@@ -245,6 +260,7 @@ func TestPRComments_IndexWithIds(t *testing.T) {
 			_, _ = w.Write([]byte(`[{"id":101,"user":{"login":"b"},"created_at":"t","body":"last"}]`))
 			return
 		}
+		linkNext(w, r, 2)
 		rows := make([]string, 100)
 		for i := range rows {
 			rows[i] = `{"id":` + itoa(i+1) + `,"user":{"login":"a"},"created_at":"t","body":"c"}`
@@ -260,5 +276,33 @@ func TestPRComments_IndexWithIds(t *testing.T) {
 	}
 	if cms[100].ID != 101 || cms[100].Body != "last" {
 		t.Fatalf("the last comment must carry its id + body: %+v", cms[100])
+	}
+}
+
+// TestDo_EmptyTokenOmitsAuthorization pins the anonymous-read contract: an empty
+// token must NOT emit `Authorization: Bearer ` — GitHub answers 401 "Bad
+// credentials" to that header, turning a public read into a hard failure. With a
+// token the header is present; without one it is absent entirely.
+func TestDo_EmptyTokenOmitsAuthorization(t *testing.T) {
+	var sawAuth string
+	var hadAuth bool
+	c := testClient(t, func(w http.ResponseWriter, r *http.Request) {
+		sawAuth = r.Header.Get("Authorization")
+		_, hadAuth = r.Header["Authorization"]
+		_, _ = w.Write([]byte(`[]`))
+	})
+	c.Token = ""
+	if _, _, _, err := c.getCached(context.Background(), "/x", "application/vnd.github+json", nil); err != nil {
+		t.Fatal(err)
+	}
+	if hadAuth {
+		t.Fatalf("an empty token must OMIT the Authorization header, got %q", sawAuth)
+	}
+	c.Token = "tok"
+	if _, _, _, err := c.getCached(context.Background(), "/y", "application/vnd.github+json", nil); err != nil {
+		t.Fatal(err)
+	}
+	if sawAuth != "Bearer tok" {
+		t.Fatalf("a token must be sent, got %q", sawAuth)
 	}
 }

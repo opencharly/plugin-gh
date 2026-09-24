@@ -220,7 +220,14 @@ func (c *Client) do(ctx context.Context, method, path string, body io.Reader, ha
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", "Bearer "+c.Token)
+	// Set Authorization ONLY when a token exists. GitHub answers 401 "Bad
+	// credentials" to an EMPTY `Bearer ` header — turning an ordinarily-anonymous
+	// public read into a hard failure — so an unauthenticated client must OMIT
+	// the header entirely (verified against api.github.com: omitted → 200,
+	// `Bearer ` → 401). The public-repo-read contract depends on this.
+	if c.Token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.Token)
+	}
 	req.Header.Set("Accept", accept)
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 	if hasBody {
@@ -236,23 +243,51 @@ func (c *Client) do(ctx context.Context, method, path string, body io.Reader, ha
 	return resp, nil
 }
 
+// nextLink returns the rel="next" URL from a Link header, or "" when there is no
+// next page. GitHub's Link header is the AUTHORITATIVE page-count signal (the
+// `rel="last"` page number is not stable under concurrent writes, and a short
+// page is not a reliable terminator for endpoints whose page size varies), so
+// pagination follows rel="next" until it is absent.
+func nextLink(linkHeader string) string {
+	for _, part := range strings.Split(linkHeader, ",") {
+		seg := strings.TrimSpace(part)
+		if !strings.Contains(seg, `rel="next"`) {
+			continue
+		}
+		lt := strings.Index(seg, "<")
+		gt := strings.Index(seg, ">")
+		if lt == -1 || gt == -1 || gt < lt {
+			continue
+		}
+		return seg[lt+1 : gt]
+	}
+	return ""
+}
+
+// relPath strips the API base from an absolute Link URL so it rides the same
+// BaseURL+path construction every request uses (and the same cache key).
+func (c *Client) relPath(abs string) string {
+	return strings.TrimPrefix(abs, c.BaseURL)
+}
+
 // requestConditional issues a GET with an optional If-None-Match and returns the
-// body, the response ETag, and whether upstream answered 304 Not Modified (the
-// caller then serves its cached body). A non-2xx/304 surfaces status + body.
-func (c *Client) requestConditional(ctx context.Context, path, accept, ifNoneMatch string) (body []byte, etag string, notModified bool, err error) {
+// body, the response ETag, the rel="next" Link target ("" at the last page), and
+// whether upstream answered 304 Not Modified (the caller then serves its cached
+// body). A non-2xx/304 surfaces status + body.
+func (c *Client) requestConditional(ctx context.Context, path, accept, ifNoneMatch string) (body []byte, etag, next string, notModified bool, err error) {
 	resp, err := c.do(ctx, http.MethodGet, path, nil, false, accept, ifNoneMatch)
 	if err != nil {
-		return nil, "", false, err
+		return nil, "", "", false, err
 	}
 	if resp.StatusCode == http.StatusNotModified {
 		_ = resp.Body.Close()
-		return nil, resp.Header.Get("ETag"), true, nil
+		return nil, resp.Header.Get("ETag"), c.relPath(nextLink(resp.Header.Get("Link"))), true, nil
 	}
 	b, err := readResponse(resp, path)
 	if err != nil {
-		return nil, "", false, err
+		return nil, "", "", false, err
 	}
-	return b, resp.Header.Get("ETag"), false, nil
+	return b, resp.Header.Get("ETag"), c.relPath(nextLink(resp.Header.Get("Link"))), false, nil
 }
 
 // getCachedJSON is the cached GET-and-decode: it serves the body from the
@@ -260,7 +295,7 @@ func (c *Client) requestConditional(ctx context.Context, path, accept, ifNoneMat
 // otherwise) and decodes it. The `cached` return is true when no network body
 // was fetched.
 func (c *Client) getCachedJSON(ctx context.Context, path string, immutable map[string]string, out any) (cached bool, err error) {
-	b, fromCache, err := c.getCached(ctx, path, "application/vnd.github+json", immutable)
+	b, _, fromCache, err := c.getCached(ctx, path, "application/vnd.github+json", immutable)
 	if err != nil {
 		return false, err
 	}
@@ -272,33 +307,47 @@ func (c *Client) getCachedJSON(ctx context.Context, path string, immutable map[s
 	return fromCache, nil
 }
 
-// getAll pages a list endpoint to completion. GitHub caps `per_page` at 100, so
-// a list longer than one page MUST be followed (a single page silently drops
-// the tail — the very class the review gate's thread fix removed); it pages by
-// page-count and stops on the first SHORT page (the same page-count contract
-// the API itself exposes, without parsing the Link header). Each page is
-// decoded by the caller's callback, which returns the rows added.
-func (c *Client) getAll(ctx context.Context, path string, decode func([]byte) (int, error)) error {
+// pageDecode decodes ONE page body and reports how many rows it added plus
+// whether the caller has all it needs (done=true stops the walk — the exact
+// signal for a bounded listing, so no page is fetched that a client-side filter
+// would then discard).
+type pageDecode func(b []byte) (added int, done bool, err error)
+
+// getAll pages a list endpoint to completion by following the Link header's
+// rel="next" — the AUTHORITATIVE page-count signal. GitHub emits the Link header
+// iff there IS a next page (verified against api.github.com: a single-page result
+// carries no Link header at all), so "no rel=next" is the exact terminator and
+// the ONLY pagination mechanism. No page-count heuristic, no fallback: a server
+// that strips Link headers is a broken boundary that must fail loudly, not a
+// condition to silently paper over (R4). The walk also stops the instant the
+// callback reports done (a bounded listing never fetches pages it will discard).
+// Each page rides the ETag-revalidated cache under its OWN URL, so a repeat
+// listing of an unchanged page set costs one 304 per page and ZERO body
+// re-fetches — and a warm in-process memo replays the whole set with no requests.
+func (c *Client) getAll(ctx context.Context, path string, decode pageDecode) error {
 	// A hard page ceiling (200 pages = 20,000 rows) so a pathological list can
-	// never page forever; every real PR is far under it.
+	// never page forever; every real PR/org listing is far under it.
+	const perPage = 100
 	const maxPages = 200
-	for page := 1; page <= maxPages; page++ {
-		sep := "?"
-		if strings.Contains(path, "?") {
-			sep = "&"
-		}
-		full := fmt.Sprintf("%s%sper_page=100&page=%d", path, sep, page)
-		b, _, err := c.getCached(ctx, full, "application/vnd.github+json", nil)
+	sep := "?"
+	if strings.Contains(path, "?") {
+		sep = "&"
+	}
+	next := fmt.Sprintf("%s%sper_page=%d", path, sep, perPage)
+	for page := 1; page <= maxPages && next != ""; page++ {
+		reqPath := next
+		b, nextPage, _, err := c.getCached(ctx, reqPath, "application/vnd.github+json", nil)
 		if err != nil {
 			return err
 		}
-		added, err := decode(b)
+		_, done, err := decode(b)
 		if err != nil {
-			return fmt.Errorf("gh: %s: decode: %w", full, err)
+			return fmt.Errorf("gh: %s: decode: %w", reqPath, err)
 		}
-		if added < 100 {
+		if done {
 			return nil
 		}
+		next = nextPage
 	}
 	return nil
 }
@@ -396,7 +445,7 @@ func (c *Client) PRMeta(ctx context.Context, repo string, pr int) (*PRMeta, erro
 // the shape that keeps a reasoning model from spiralling on a multi-file diff.
 func (c *Client) PRFiles(ctx context.Context, repo string, pr int) ([]PRFile, error) {
 	var files []PRFile
-	err := c.getAll(ctx, fmt.Sprintf("/repos/%s/pulls/%d/files", repo, pr), func(b []byte) (int, error) {
+	err := c.getAll(ctx, fmt.Sprintf("/repos/%s/pulls/%d/files", repo, pr), func(b []byte) (int, bool, error) {
 		var page []struct {
 			Filename  string `json:"filename"`
 			Status    string `json:"status"`
@@ -406,7 +455,7 @@ func (c *Client) PRFiles(ctx context.Context, repo string, pr int) ([]PRFile, er
 			SHA       string `json:"sha"`
 		}
 		if err := json.Unmarshal(b, &page); err != nil {
-			return 0, err
+			return 0, false, err
 		}
 		for _, f := range page {
 			files = append(files, PRFile{
@@ -414,7 +463,7 @@ func (c *Client) PRFiles(ctx context.Context, repo string, pr int) ([]PRFile, er
 				Patch: f.Patch, SHA: f.SHA, NoPatch: f.Patch == "",
 			})
 		}
-		return len(page), nil
+		return len(page), false, nil
 	})
 	if err != nil {
 		return nil, err
@@ -427,7 +476,7 @@ func (c *Client) PRFiles(ctx context.Context, repo string, pr int) ([]PRFile, er
 // id via PRComment, so a long thread is delivered one comment per message.
 func (c *Client) PRComments(ctx context.Context, repo string, pr int) ([]PRComment, error) {
 	var out []PRComment
-	err := c.getAll(ctx, fmt.Sprintf("/repos/%s/issues/%d/comments", repo, pr), func(b []byte) (int, error) {
+	err := c.getAll(ctx, fmt.Sprintf("/repos/%s/issues/%d/comments", repo, pr), func(b []byte) (int, bool, error) {
 		var page []struct {
 			ID   int `json:"id"`
 			User struct {
@@ -437,7 +486,7 @@ func (c *Client) PRComments(ctx context.Context, repo string, pr int) ([]PRComme
 			Body      string `json:"body"`
 		}
 		if err := json.Unmarshal(b, &page); err != nil {
-			return 0, err
+			return 0, false, err
 		}
 		for _, cm := range page {
 			author := cm.User.Login
@@ -446,7 +495,7 @@ func (c *Client) PRComments(ctx context.Context, repo string, pr int) ([]PRComme
 			}
 			out = append(out, PRComment{ID: cm.ID, Author: author, CreatedAt: cm.CreatedAt, Body: cm.Body})
 		}
-		return len(page), nil
+		return len(page), false, nil
 	})
 	if err != nil {
 		return nil, err
@@ -498,7 +547,7 @@ func (c *Client) PRPaths(ctx context.Context, repo string, pr int) (string, erro
 // deliver the change one file at a time should prefer PRFiles (per-file Patch);
 // PRDiff is retained for callers that genuinely want the unified whole.
 func (c *Client) PRDiff(ctx context.Context, repo string, pr int) (string, error) {
-	b, _, err := c.getCached(ctx, fmt.Sprintf("/repos/%s/pulls/%d", repo, pr), "application/vnd.github.diff", nil)
+	b, _, _, err := c.getCached(ctx, fmt.Sprintf("/repos/%s/pulls/%d", repo, pr), "application/vnd.github.diff", nil)
 	if err != nil {
 		return "", err
 	}
@@ -517,7 +566,15 @@ type commitWire struct {
 
 func (c *Client) PRCommits(ctx context.Context, repo string, pr int) ([]PRCommit, error) {
 	var raw []commitWire
-	if err := c.Get(ctx, fmt.Sprintf("/repos/%s/pulls/%d/commits?per_page=100", repo, pr), &raw); err != nil {
+	err := c.getAll(ctx, fmt.Sprintf("/repos/%s/pulls/%d/commits", repo, pr), func(b []byte) (int, bool, error) {
+		var page []commitWire
+		if err := json.Unmarshal(b, &page); err != nil {
+			return 0, false, err
+		}
+		raw = append(raw, page...)
+		return len(page), false, nil
+	})
+	if err != nil {
 		return nil, err
 	}
 	out := make([]PRCommit, len(raw))
@@ -540,7 +597,20 @@ func (c *Client) PRThread(ctx context.Context, repo string, pr int) (*PRThread, 
 			Login string `json:"login"`
 		} `json:"user"`
 	}
-	if err := c.Get(ctx, fmt.Sprintf("/repos/%s/issues/%d/comments?per_page=100", repo, pr), &comments); err != nil {
+	err := c.getAll(ctx, fmt.Sprintf("/repos/%s/issues/%d/comments", repo, pr), func(b []byte) (int, bool, error) {
+		var page []struct {
+			Body string `json:"body"`
+			User struct {
+				Login string `json:"login"`
+			} `json:"user"`
+		}
+		if err := json.Unmarshal(b, &page); err != nil {
+			return 0, false, err
+		}
+		comments = append(comments, page...)
+		return len(page), false, nil
+	})
+	if err != nil {
 		return nil, err
 	}
 	out := make([]string, len(comments))

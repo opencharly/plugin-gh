@@ -23,7 +23,11 @@ does not reach.
 - **Real diagnostics** — every non-2xx surfaces the HTTP status AND the
   response body; a call that fails with no detail is a defect.
 - **Typed ops** — pr_meta, pr_files (+ the space-separated paths for the
-  pr-apply seam), pr_diff, pr_commits, pr_thread, head_sha, and **document**.
+  pr-apply seam), pr_diff, pr_commits, pr_thread, head_sha, **document**, and
+  **issues**.
+- **Link-header pagination** — every list is followed by the Link header's
+  `rel="next"` (the ONE mechanism; GitHub emits it iff there is a next page, so
+  its absence is the exact terminator). There is no page-count guesswork.
 - **A shared response cache** — every read goes through the ONE
   `github.com/opencharly/spec/cache` **ArtifactStore** (an OCI Image Layout,
   R3). Mutable reads (PR/issue meta,
@@ -38,7 +42,8 @@ does not reach.
 | Class | Word | Shape |
 |---|---|---|
 | verb | `gh` | `gh: {op: pr_meta\|pr_files\|pr_diff\|pr_commits\|pr_thread\|head_sha\|document, repo: OWNER/NAME, number: N, target?: issue\|pr, format?: json\|yaml, out?: PATH, include_file_content?: bool}` |
-| command | `gh` | `charly gh <op> --repo OWNER/NAME --number N [--target …] [--format …] [--out …]` |
+| verb | `gh` | `gh: {op: issues, repo?: OWNER/NAME, org?: LOGIN, state?: open\|closed\|all, kind?: issue\|pr\|all, since?: TS, limit?: N, include_body?: bool, format?: json\|yaml, out?: PATH}` |
+| command | `gh` | `charly gh <op> [--repo OWNER/NAME \| --org ORG] [--number N] [--target …] [--format …] [--out …] [--state …] [--kind …] [--since …] [--limit N] [--include-body]` |
 
 ### The `document` op
 
@@ -60,13 +65,43 @@ written.
   file is recorded with `is_binary`/`truncated` + `omitted_reason` rather than
   silently dropped.
 
+### The `issues` op
+
+`gh: {op: issues, org: opencharly}` (whole org) or
+`gh: {op: issues, repo: opencharly/plugin-gh}` (one repo) lists the issues AND
+pull requests as a compact `#GhIssueIndex` — the efficient discovery surface to
+pair with `document`: list cheaply, then fetch only the items you care about.
+
+- **Org-wide in ONE call** — `/orgs/{org}/issues?filter=all` returns every open
+  issue+PR across the whole organization. (The endpoint defaults to
+  `filter=assigned`, which under-lists; the op always sends `filter=all`.) It
+  requires **authentication** — with no credential the op reports a
+  host-visible **skip**, never a fabricated listing.
+- **Repo-scoped** — `/repos/{owner}/{repo}/issues`, public (no credential).
+- `state` — `open` (default) | `closed` | `all`.
+- `kind` — `all` (default) | `issue` | `pr` (GitHub has no server-side
+  issue-only filter here; applied client-side off the `pull_request` marker).
+- `since` — only items updated at/after an RFC3339 timestamp (incremental).
+- `limit` — stop after N items (the walk stops exactly, no discarded page).
+- `include_body` — include each item's body (default false; the index is a
+  compact listing).
+
+Every row carries `kind`, `repo`, `number`, `title`, `state`, `author`, the
+timestamps, `url`, `labels`, `comment_count`, and — for a PR — `draft` and
+`merged_at` (the only PR signals the issues endpoints carry; the head/base refs
+and SHA live on `/pulls`, so use the `document` op for those). The whole index is
+cached: a repeat listing of an unchanged org/repo is served from the per-page
+ETag cache with no body re-fetch (`provenance.cached=true`).
+
 The Go client: `github.com/opencharly/plugin-gh/candy/plugin-gh/gh`.
 
 ## Verify
 
 ```
-cd candy/plugin-gh && go test ./...      # hermetic unit + cache + document tests
+cd candy/plugin-gh && go test ./...      # hermetic unit + cache + document + issues tests
 charly gh --self-test                    # offline schema/serialization probe
+charly check run gh-issues-repo          # R10: repo-scoped issues + cache-warm (no credential)
+charly check run gh-issues-org           # R10: org-wide issues (skips cleanly without a token)
 ```
 
 The live GitHub read tests opt in via `GHKIT_LIVE_REPO` (+ a token) and SKIP

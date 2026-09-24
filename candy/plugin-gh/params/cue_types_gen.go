@@ -3,18 +3,31 @@
 package params
 
 // #GhInput — the verb input. `op` selects the read; the document op adds the
-// target/format/out/include_file_content knobs.
+// target/format/out/include_file_content knobs, and the issues op adds the
+// org/state/kind/since/limit/include_body list knobs.
+//
+// FLAT, not per-op-discriminated: a CUE `if`/disjunction on `op` degrades
+// `cue exp gengotypes` to `any` (RDD-proven), so — exactly like #AppiumInput —
+// the schema is one flat struct and the provider enforces the per-op
+// requirements at runtime (repo+number for the reads, org-or-repo for issues).
 type GhInput struct {
 	// op — the read to run. The first six are the original PR reads; `document`
-	// assembles the full structured issue/PR artifact.
+	// assembles the full structured issue/PR artifact; `issues` lists a repo's or
+	// an org's issues AND pull requests as a compact index.
 	Op string `yaml:"op,omitempty" json:"op"`
 
-	// repo — the FULL slug (owner/name) — e.g. omacom/omarchy
-	Repo string `yaml:"repo,omitempty" json:"repo"`
+	// repo — the FULL slug (owner/name) — e.g. omacom/omarchy. Required for the
+	// single-item reads and for a repo-scoped `issues` list; omitted for an
+	// org-scoped `issues` list.
+	Repo string `yaml:"repo,omitempty" json:"repo,omitempty"`
+
+	// org — the org login (e.g. opencharly). Required for an org-scoped `issues`
+	// list (one request returns every open issue+PR across the whole org).
+	Org string `yaml:"org,omitempty" json:"org,omitempty"`
 
 	// number — the issue OR pull-request number (renamed from `pr`: the document
 	// op addresses issues too, and `pr` mis-described an issue read).
-	Number int `yaml:"number,omitempty" json:"number"`
+	Number int `yaml:"number,omitempty" json:"number,omitempty"`
 
 	// target — document only: which artifact to assemble. Omitted auto-detects
 	// (a pull request number yields a PR document; anything else an issue).
@@ -32,6 +45,25 @@ type GhInput struct {
 	// A pointer so omission (nil) means the DEFAULT (true) while an explicit false
 	// disables it; a binary or oversized file is recorded with omitted_reason.
 	IncludeFileContent *bool `yaml:"include_file_content,omitempty" json:"include_file_content,omitempty"`
+
+	// state — issues only: the state filter (default open).
+	State string `yaml:"state,omitempty" json:"state,omitempty"`
+
+	// kind — issues only: filter to issues, pull requests, or both (default all).
+	// GitHub has no server-side issue-only filter here, so this is applied
+	// client-side off the `pull_request` marker.
+	Kind string `yaml:"kind,omitempty" json:"kind,omitempty"`
+
+	// since — issues only: only items updated at/after this RFC3339 timestamp
+	// (the incremental-refresh knob; also narrows an ETag-keyed page set).
+	Since string `yaml:"since,omitempty" json:"since,omitempty"`
+
+	// limit — issues only: stop after this many items (0/omitted = all).
+	Limit int `yaml:"limit,omitempty" json:"limit,omitempty"`
+
+	// include_body — issues only: include each item's body in the index (larger;
+	// default false — the index is a compact listing).
+	IncludeBody *bool `yaml:"include_body,omitempty" json:"include_body,omitempty"`
 }
 
 // #GhDocument — the structured issue/PR artifact. EVERY comment surface is
@@ -204,4 +236,72 @@ type GhReviewComment struct {
 
 	// in_reply_to_id is set when this comment replies to another review comment.
 	InReplyToID *int `yaml:"in_reply_to_id,omitempty" json:"in_reply_to_id,omitempty"`
+}
+
+// #GhIssueIndex — the compact listing the `issues` op emits: every open (or
+// closed/all) issue AND pull request for a repo or an org, as lightweight rows
+// a caller turns into documents or a review queue WITHOUT a per-item fetch. The
+// pull-request rows carry the cheap signals the ISSUES endpoints actually
+// return (draft + merged_at, via #GhIssueRefPR); the head/base refs and SHA are
+// NOT on this endpoint (they live on /pulls) — use the `document` op for those.
+type GhIssueIndex struct {
+	Scope string `yaml:"scope,omitempty" json:"scope"`
+
+	State string `yaml:"state,omitempty" json:"state"`
+
+	Kind string `yaml:"kind,omitempty" json:"kind"`
+
+	Count int `yaml:"count,omitempty" json:"count"`
+
+	Items []GhIssueRef `yaml:"items,omitempty" json:"items"`
+
+	// fetched_at is when the index was assembled.
+	FetchedAt string `yaml:"fetched_at,omitempty" json:"fetched_at"`
+
+	Provenance GhProvenance `yaml:"provenance,omitempty" json:"provenance"`
+}
+
+// #GhIssueRef — one row in the index: the issue/PR identity plus the cheap
+// signals a queue needs. body is present only when include_body is set.
+type GhIssueRef struct {
+	Kind string `yaml:"kind,omitempty" json:"kind"`
+
+	Repo string `yaml:"repo,omitempty" json:"repo"`
+
+	Number int `yaml:"number,omitempty" json:"number"`
+
+	Title string `yaml:"title,omitempty" json:"title"`
+
+	State string `yaml:"state,omitempty" json:"state"`
+
+	Author string `yaml:"author,omitempty" json:"author"`
+
+	CreatedAt string `yaml:"created_at,omitempty" json:"created_at"`
+
+	UpdatedAt string `yaml:"updated_at,omitempty" json:"updated_at"`
+
+	URL string `yaml:"url,omitempty" json:"url"`
+
+	Labels []string `yaml:"labels,omitempty" json:"labels"`
+
+	CommentCount int `yaml:"comment_count,omitempty" json:"comment_count"`
+
+	// pr is present iff kind == "pr" (the cheap PR signals).
+	PR *GhIssueRefPR `yaml:"pr,omitempty" json:"pr,omitempty"`
+
+	// body is present only when include_body was requested.
+	Body string `yaml:"body,omitempty" json:"body,omitempty"`
+}
+
+// #GhIssueRefPR — the cheap pull-request signals the ISSUES listing actually
+// carries (not a full PR document — use the document op for that). The issues
+// endpoints return the issue object, whose `pull_request` member is only
+// {url, html_url, diff_url, patch_url, merged_at}; the head/base refs and SHA
+// live on /pulls and are deliberately NOT claimed here. `draft` is the
+// top-level issue field the endpoint DOES return for a PR row.
+type GhIssueRefPR struct {
+	Draft bool `yaml:"draft,omitempty" json:"draft"`
+
+	// merged_at is set once the PR merged (the pull_request.merged_at member).
+	MergedAt string `yaml:"merged_at,omitempty" json:"merged_at,omitempty"`
 }
