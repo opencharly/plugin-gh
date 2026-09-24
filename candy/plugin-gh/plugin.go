@@ -20,7 +20,9 @@ import (
 	"github.com/opencharly/plugin-gh/candy/plugin-gh/gh"
 	"github.com/opencharly/plugin-gh/candy/plugin-gh/params"
 	"github.com/opencharly/sdk"
+	"github.com/opencharly/sdk/kit"
 	pb "github.com/opencharly/spec/proto"
+	"github.com/opencharly/spec/spec"
 )
 
 //go:embed schema/*.cue
@@ -40,8 +42,21 @@ func NewMeta() pb.PluginMetaServer {
 type provider struct{ pb.UnimplementedProviderServer }
 
 func (provider) Invoke(ctx context.Context, req *pb.InvokeRequest) (*pb.InvokeReply, error) {
-	switch {
-	case req.GetOp() == sdk.OpRun: // command:gh — the standalone CLI
+	// Discriminate on the CAPABILITY CLASS, never the op selector: BOTH the
+	// command and the verb surface are dispatched with ops.OpRun (the generic
+	// runtime selector — see charly/provider_checkenv.go invokeVerbProvider and
+	// candy/plugin-agentteams/plugin.go invokeCommand). A `GetOp() == OpRun`
+	// switch therefore cannot tell `charly gh …` (command) from a `gh:` check
+	// step (verb), and routed EVERY out-of-process verb call into CliMain with
+	// empty args → `gh: exit 2`. Class is the one reliable discriminator; an
+	// out-of-tree command never reaches here anyway (charly fork/execs it via
+	// syscall.Exec — provider_command_external.go), so the command arm is the
+	// compiled-in in-proc placement.
+	switch req.GetClass() {
+	case "command":
+		if req.GetOp() != sdk.OpRun {
+			return nil, fmt.Errorf("gh: unsupported command op %q", req.GetOp())
+		}
 		var in struct {
 			Args []string `json:"args"`
 		}
@@ -54,27 +69,38 @@ func (provider) Invoke(ctx context.Context, req *pb.InvokeRequest) (*pb.InvokeRe
 		}
 		return &pb.InvokeReply{}, nil
 
-	default: // verb:gh — the check surface
+	default: // verb:gh — the check surface (dispatched with ops.OpRun)
 		return runVerb(req)
 	}
 }
 
-// runVerb: the gh: check surface. The op runs; a non-2xx or a failed
-// expectation fails the step with the REAL detail (never a bare "failed").
+// runVerb: the gh: check surface. The framework hands a plugin VERB the FULL
+// #Op envelope as params_json (plugin_input nested under `plugin_input`) — the
+// SAME shape every sibling out-of-process verb decodes (candy/plugin-bpf/
+// provider.go, candy/plugin-appium). The op runs; a non-2xx transport error and
+// a failed EXPECTATION are both folded through the shared verdict pipeline
+// (sdk.VerbVerdict, R3 — one matcher implementation), so authored
+// exit_status/stdout/stderr on the step are evaluated rather than a bare pass.
 func runVerb(req *pb.InvokeRequest) (*pb.InvokeReply, error) {
-	var in params.GhInput
+	var op spec.Op
 	if len(req.GetParamsJson()) > 0 {
-		if err := json.Unmarshal(req.GetParamsJson(), &in); err != nil {
-			return nil, fmt.Errorf("gh input decode: %w", err)
+		if err := json.Unmarshal(req.GetParamsJson(), &op); err != nil {
+			return sdk.ResultJSON("fail", "gh: decode op: "+err.Error())
 		}
 	}
+	var in params.GhInput
+	kit.DecodeInput(op.PluginInput, &in)
 	result, err := runOp(context.Background(), in)
-	if err != nil {
-		b, _ := json.Marshal(map[string]any{"status": "fail", "message": err.Error()})
-		return &pb.InvokeReply{ResultJson: b}, nil
+	var out string
+	if err == nil {
+		b, merr := json.Marshal(result)
+		if merr != nil {
+			err = fmt.Errorf("gh: marshal result: %w", merr)
+		} else {
+			out = string(b)
+		}
 	}
-	b, _ := json.Marshal(map[string]any{"status": "pass", "result": result})
-	return &pb.InvokeReply{ResultJson: b}, nil
+	return sdk.VerbVerdict("gh", in.Op, out, err, &op, false)
 }
 
 // runOp dispatches one gh op against ghkit (the single implementation).
