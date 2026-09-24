@@ -213,11 +213,14 @@
 	body?: string @go(Body)
 }
 
-// #GhIssueRefPR — the cheap pull-request signals carried on an index row (not a
-// full PR document — use the document op for that).
+// #GhIssueRefPR — the cheap pull-request signals the ISSUES listing actually
+// carries (not a full PR document — use the document op for that). The issues
+// endpoints return the issue object, whose `pull_request` member is only
+// {url, html_url, diff_url, patch_url, merged_at}; the head/base refs and SHA
+// live on /pulls and are deliberately NOT claimed here. `draft` is the
+// top-level issue field the endpoint DOES return for a PR row.
 #GhIssueRefPR: {
-	head_sha: string @go(HeadSHA)
-	base_ref: string @go(BaseRef)
-	head_ref: string @go(HeadRef)
-	draft:    bool   @go(Draft)
+	draft: bool @go(Draft)
+	// merged_at is set once the PR merged (the pull_request.merged_at member).
+	merged_at?: string @go(MergedAt)
 }

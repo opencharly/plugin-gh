@@ -23,7 +23,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/opencharly/plugin-gh/candy/plugin-gh/params"
@@ -51,31 +50,15 @@ type issueRow struct {
 	Labels []struct {
 		Name string `json:"name"`
 	} `json:"labels"`
-	// PullRequest is non-nil iff this row is a pull request.
+	// PullRequest is non-nil iff this row is a pull request. The issues endpoint
+	// carries ONLY url/html_url/diff_url/patch_url/merged_at here — the head/base
+	// refs and SHA are NOT on this endpoint (they live on /pulls), so the index
+	// does not claim them.
 	PullRequest *struct {
 		MergedAt *string `json:"merged_at"`
 	} `json:"pull_request"`
-	// Draft is meaningful only for a PR row.
+	// Draft is the top-level issue field the endpoint returns for a PR row.
 	Draft bool `json:"draft"`
-	// Head carries the head ref + sha; base the base ref (PR rows only).
-	Head struct {
-		SHA string `json:"sha"`
-		Ref string `json:"ref"`
-	} `json:"head"`
-	Base struct {
-		Ref string `json:"ref"`
-	} `json:"base"`
-}
-
-// repoFromURL extracts "owner/name" from a GitHub repository_url
-// (https://api.github.com/repos/owner/name).
-func repoFromURL(u string) string {
-	const marker = "/repos/"
-	i := strings.Index(u, marker)
-	if i == -1 {
-		return ""
-	}
-	return u[i+len(marker):]
 }
 
 // ListIssues lists issues AND pull requests for an org (org != "") or a repo
@@ -171,9 +154,11 @@ func (c *Client) toIssueRef(r issueRow, isPR, includeBody bool) params.GhIssueRe
 	}
 	if isPR {
 		ref.Kind = "pr"
-		ref.PR = &params.GhIssueRefPR{
-			HeadSHA: r.Head.SHA, BaseRef: r.Base.Ref, HeadRef: r.Head.Ref, Draft: r.Draft,
+		pr := &params.GhIssueRefPR{Draft: r.Draft}
+		if r.PullRequest.MergedAt != nil {
+			pr.MergedAt = *r.PullRequest.MergedAt
 		}
+		ref.PR = pr
 	}
 	if includeBody {
 		ref.Body = r.Body

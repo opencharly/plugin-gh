@@ -87,10 +87,11 @@ pair with `document`: list cheaply, then fetch only the items you care about.
   compact listing).
 
 Every row carries `kind`, `repo`, `number`, `title`, `state`, `author`, the
-timestamps, `url`, `labels`, `comment_count`, and — for a PR — the cheap
-`head_sha`/`base_ref`/`head_ref`/`draft` signals. The whole index is cached: a
-repeat listing of an unchanged org/repo is served from the per-page ETag cache
-with no body re-fetch (`provenance.cached=true`).
+timestamps, `url`, `labels`, `comment_count`, and — for a PR — `draft` and
+`merged_at` (the only PR signals the issues endpoints carry; the head/base refs
+and SHA live on `/pulls`, so use the `document` op for those). The whole index is
+cached: a repeat listing of an unchanged org/repo is served from the per-page
+ETag cache with no body re-fetch (`provenance.cached=true`).
 
 The Go client: `github.com/opencharly/plugin-gh/candy/plugin-gh/gh`.
 

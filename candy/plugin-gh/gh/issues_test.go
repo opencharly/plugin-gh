@@ -25,8 +25,8 @@ func TestListIssues_OrgScope(t *testing.T) {
 			{"number":1,"title":"an issue","state":"open","created_at":"c","updated_at":"u","html_url":"h","comments":3,
 			 "repository":{"full_name":"opencharly/charly"},"user":{"login":"alice"},"labels":[{"name":"bug"}]},
 			{"number":2,"title":"a PR","state":"open","created_at":"c","updated_at":"u","html_url":"h","comments":0,
-			 "repository":{"full_name":"opencharly/plugin-gh"},"user":{"login":"bob"},
-			 "pull_request":{"merged_at":null},"draft":true,"head":{"sha":"hs","ref":"feat"},"base":{"ref":"main"}}
+			 "repository":{"full_name":"opencharly/plugin-gh"},"user":{"login":"bob"},"draft":true,
+			 "pull_request":{"url":"https://api.github.com/repos/opencharly/plugin-gh/pulls/2","merged_at":null}}
 		]`))
 	})
 	idx, err := c.ListIssues(context.Background(), "opencharly", "", "", "", "", 0, false)
@@ -46,7 +46,7 @@ func TestListIssues_OrgScope(t *testing.T) {
 	if len(issue.Labels) != 1 || issue.Labels[0] != "bug" {
 		t.Fatalf("labels = %v", issue.Labels)
 	}
-	if pr.Kind != "pr" || pr.PR == nil || pr.PR.HeadSHA != "hs" || pr.PR.HeadRef != "feat" || !pr.PR.Draft {
+	if pr.Kind != "pr" || pr.PR == nil || !pr.PR.Draft || pr.PR.MergedAt != "" {
 		t.Fatalf("pr row = %+v (pr=%+v)", pr, pr.PR)
 	}
 	if issue.PR != nil {

@@ -45,7 +45,7 @@ gh-issues-repo:
         disposable: true
         lifecycle: dev
         description: >-
-            R10 witness for the repo-scoped `issues` op and the Link-header pagination. `gh: {op: issues, repo: opencharly/plugin-gh, state: all}` runs the ONE implementation over /repos/{owner}/{repo}/issues — no credential required (a public repo listing). It asserts the compact index (scope + a non-zero count + the pull_request marker mapping to kind=pr) and then, in a SECOND identical step, that the repeat listing is served entirely from the per-page ETag cache (provenance.cached=true) with no body re-fetch — the cache-efficiency claim, proven live.
+            R10 witness for the repo-scoped `issues` op, the `pr_commits` pagination, and the cache. The repo listing (public, no credential) proves the compact index + PR-marker mapping; a second identical step proves the repeat listing is served entirely from the per-page ETag cache (provenance.cached=true). The `pr_commits` step exercises the formerly-single-page commits read against a real PR.
         plan:
             - check: the repo-scoped issues op returns a compact index of the repo's issues AND pull requests
               id: gh-issues-repo-shape
@@ -70,6 +70,17 @@ gh-issues-repo:
               stdout:
                 - contains: '"cached":true'
               exit_status: 0
+            - check: the pr_commits op returns a PR's commits (the paginated commits read)
+              id: gh-prcommits-paged
+              gh:
+                op: pr_commits
+                repo: opencharly/plugin-gh
+                number: 4
+              context:
+                - runtime
+              stdout:
+                - contains: 'commits'
+              exit_status: 0
 gh-issues-org:
     local:
         from: gh-issues-app
@@ -77,7 +88,7 @@ gh-issues-org:
         disposable: true
         lifecycle: dev
         description: >-
-            R10 witness for the ORG-WIDE fetch: `gh: {op: issues, org: opencharly, kind: all}` lists every open issue AND pull request across the whole org in ONE paginated call to /orgs/{org}/issues (filter=all — the endpoint defaults to filter=assigned, which would under-list). That endpoint requires authentication, so when no GH_TOKEN/GITHUB_TOKEN is present the op reports a host-visible SKIP (never a fabricated listing); with a token the bed asserts the real org index (scope org:opencharly, a non-zero count). The bed is credential-gated to respect the "live or skip" contract.
+            R10 witness for the ORG-WIDE fetch: `gh: {op: issues, org: opencharly, kind: all}` lists every open issue AND pull request across the whole org in ONE paginated call to /orgs/{org}/issues (filter=all — the endpoint defaults to filter=assigned, which would under-list). That endpoint requires authentication, so when no GH_TOKEN/GITHUB_TOKEN is present the op reports a host-visible SKIP (never a fabricated listing); with a token the bed asserts the real org index. The state=all step forces a genuinely MULTI-PAGE Link-header walk (the org's full history spans dozens of pages) so the new pagination branch runs LIVE, not only under a hermetic stub. The bed is credential-gated to respect the "live or skip" contract.
         plan:
             - check: the org-wide issues op lists the whole org as one compact index
               id: gh-issues-org-shape
@@ -89,4 +100,17 @@ gh-issues-org:
                 - runtime
               stdout:
                 - contains: 'org:opencharly'
+              exit_status: 0
+            - check: an org-wide state=all listing walks the Link header across MANY pages to a full index
+              id: gh-issues-org-multipage
+              gh:
+                op: issues
+                org: opencharly
+                state: all
+                kind: all
+              context:
+                - runtime
+              stdout:
+                - contains: 'org:opencharly'
+                - contains: '"count":'
               exit_status: 0

@@ -293,14 +293,15 @@ type GhIssueRef struct {
 	Body string `yaml:"body,omitempty" json:"body,omitempty"`
 }
 
-// #GhIssueRefPR — the cheap pull-request signals carried on an index row (not a
-// full PR document — use the document op for that).
+// #GhIssueRefPR — the cheap pull-request signals the ISSUES listing actually
+// carries (not a full PR document — use the document op for that). The issues
+// endpoints return the issue object, whose `pull_request` member is only
+// {url, html_url, diff_url, patch_url, merged_at}; the head/base refs and SHA
+// live on /pulls and are deliberately NOT claimed here. `draft` is the
+// top-level issue field the endpoint DOES return for a PR row.
 type GhIssueRefPR struct {
-	HeadSHA string `yaml:"head_sha,omitempty" json:"head_sha"`
-
-	BaseRef string `yaml:"base_ref,omitempty" json:"base_ref"`
-
-	HeadRef string `yaml:"head_ref,omitempty" json:"head_ref"`
-
 	Draft bool `yaml:"draft,omitempty" json:"draft"`
+
+	// merged_at is set once the PR merged (the pull_request.merged_at member).
+	MergedAt string `yaml:"merged_at,omitempty" json:"merged_at,omitempty"`
 }
