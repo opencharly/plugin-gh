@@ -86,6 +86,10 @@ gh-issues-repo:
               stdout:
                 - contains: 'commits'
               exit_status: 0
+            # Splice the plugin-gh candy's OWN plan (R3 — no duplicated step): this
+            # includes plugin-gh-document-self-test, the changed step, so the bed
+            # exercises the exact shipped step rather than a copy of it.
+            - include: candy:plugin-gh
 gh-issues-org:
     local:
         from: gh-issues-app

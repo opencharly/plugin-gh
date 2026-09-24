@@ -55,7 +55,7 @@ plugin-gh:
               id: plugin-gh-unit-tests
               context: [build]
               command: "go test ./..."
-            - check: the embedded #GhDocument schema compiles, validates a sample, and serializes
+            - check: "the embedded #GhDocument schema compiles, validates a sample, and serializes"
               id: plugin-gh-document-self-test
               context: [runtime]
               command: "charly gh --self-test"
