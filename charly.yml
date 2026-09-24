@@ -57,7 +57,7 @@ gh-issues-repo:
                 - runtime
               stdout:
                 - contains: 'repo:opencharly/plugin-gh'
-                - contains: '"kind": "pr"'
+                - contains: '"kind":"pr"'
               exit_status: 0
 gh-issues-org:
     local:
