@@ -45,7 +45,7 @@ gh-issues-repo:
         disposable: true
         lifecycle: dev
         description: >-
-            R10 witness for the repo-scoped `issues` op and the Link-header pagination. `gh: {op: issues, repo: opencharly/plugin-gh, state: all}` runs the ONE implementation over /repos/{owner}/{repo}/issues — no credential required. It asserts the compact index (scope + a non-zero count + the per-row repo slug + the pull_request marker mapping to kind=pr) and, after the bed's fresh rebuild, that a repeat listing is served from the per-page ETag cache (provenance.cached=true) with no body re-fetch.
+            R10 witness for the repo-scoped `issues` op and the Link-header pagination. `gh: {op: issues, repo: opencharly/plugin-gh, state: all}` runs the ONE implementation over /repos/{owner}/{repo}/issues — no credential required (a public repo listing). It asserts the compact index (scope + a non-zero count + the pull_request marker mapping to kind=pr) and then, in a SECOND identical step, that the repeat listing is served entirely from the per-page ETag cache (provenance.cached=true) with no body re-fetch — the cache-efficiency claim, proven live.
         plan:
             - check: the repo-scoped issues op returns a compact index of the repo's issues AND pull requests
               id: gh-issues-repo-shape
@@ -58,6 +58,17 @@ gh-issues-repo:
               stdout:
                 - contains: 'repo:opencharly/plugin-gh'
                 - contains: '"kind":"pr"'
+              exit_status: 0
+            - check: a second identical listing is served from the response cache (provenance.cached=true)
+              id: gh-issues-repo-cache-warm
+              gh:
+                op: issues
+                repo: opencharly/plugin-gh
+                state: all
+              context:
+                - runtime
+              stdout:
+                - contains: '"cached":true'
               exit_status: 0
 gh-issues-org:
     local:
