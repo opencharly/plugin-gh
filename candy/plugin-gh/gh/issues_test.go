@@ -171,6 +171,33 @@ func TestListIssues_LimitStopsEarly(t *testing.T) {
 	}
 }
 
+// TestListIssues_LimitOnPageBoundaryStops pins the EXACT boundary case: a limit
+// that is an exact multiple of per_page (here limit=100 with a full 100-row
+// page) must STILL stop after that page — the done signal is page-level, so the
+// next page is never fetched-and-discarded. A row-loop-only check fails this.
+func TestListIssues_LimitOnPageBoundaryStops(t *testing.T) {
+	var requests atomic.Int32
+	c := cachedTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		linkNext(w, r, 2)
+		var rows []string
+		for i := 1; i <= 100; i++ {
+			rows = append(rows, fmt.Sprintf(`{"number":%d,"repository":{"full_name":"o/r"}}`, i))
+		}
+		_, _ = w.Write([]byte("[" + strings.Join(rows, ",") + "]"))
+	})
+	idx, err := c.ListIssues(context.Background(), "o", "", "", "", "", 100, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if idx.Count != 100 {
+		t.Fatalf("limit=100 must yield exactly 100 items, got %d", idx.Count)
+	}
+	if n := requests.Load(); n != 1 {
+		t.Fatalf("limit=100 on a full page must STOP after page 1, got %d requests (page 2 fetched then discarded)", n)
+	}
+}
+
 // TestGetAll_NoLinkHeaderIsTerminal pins the exact terminator: with NO Link
 // header on page 1 the walk stops after one page even when that page is a FULL
 // 100 rows — GitHub emits rel="next" iff there is a next page, so absence is the

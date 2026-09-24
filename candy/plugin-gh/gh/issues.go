@@ -121,13 +121,16 @@ func (c *Client) ListIssues(ctx context.Context, org, repo, state, kind, since s
 				continue
 			}
 			if limit > 0 && len(idx.Items) >= limit {
-				// Bounded listing satisfied: stop the walk exactly here, so no
-				// further page is fetched for rows that would be discarded.
-				return len(page), true, nil
+				break
 			}
 			idx.Items = append(idx.Items, c.toIssueRef(r, isPR, includeBody))
 		}
-		return len(page), false, nil
+		// Report done at the PAGE level, AFTER the row loop: when `limit` has been
+		// reached the walk must stop HERE — checking inside the loop alone would
+		// let a limit that lands exactly on a page boundary (e.g. limit=100 with a
+		// full 100-row page) fall through with done=false and fetch a next page
+		// only to discard it.
+		return len(page), limit > 0 && len(idx.Items) >= limit, nil
 	})
 	if err != nil {
 		return nil, err
