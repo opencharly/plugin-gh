@@ -241,9 +241,9 @@ type GhReviewComment struct {
 // #GhIssueIndex — the compact listing the `issues` op emits: every open (or
 // closed/all) issue AND pull request for a repo or an org, as lightweight rows
 // a caller turns into documents or a review queue WITHOUT a per-item fetch. The
-// pull-request rows carry the PR-only fields (head_sha/draft/base_ref/head_ref)
-// so a caller can detect a moved PR without reading it; `document` is the op
-// that then fetches one row in full.
+// pull-request rows carry the cheap signals the ISSUES endpoints actually
+// return (draft + merged_at, via #GhIssueRefPR); the head/base refs and SHA are
+// NOT on this endpoint (they live on /pulls) — use the `document` op for those.
 type GhIssueIndex struct {
 	Scope string `yaml:"scope,omitempty" json:"scope"`
 

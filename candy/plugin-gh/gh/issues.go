@@ -139,8 +139,9 @@ func (c *Client) ListIssues(ctx context.Context, org, repo, state, kind, since s
 	return idx, nil
 }
 
-// toIssueRef converts one API row into a #GhIssueRef, deriving the per-repo
-// fields from repository_url (an org listing spans repos).
+// toIssueRef converts one API row into a #GhIssueRef. The repo comes from the
+// STRUCTURED repository.full_name (an org listing spans repos) — never parsed
+// from a URL.
 func (c *Client) toIssueRef(r issueRow, isPR, includeBody bool) params.GhIssueRef {
 	ref := params.GhIssueRef{
 		Kind: "issue", Repo: r.Repository.FullName, Number: r.Number,
