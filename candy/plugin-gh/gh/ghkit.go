@@ -220,7 +220,14 @@ func (c *Client) do(ctx context.Context, method, path string, body io.Reader, ha
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", "Bearer "+c.Token)
+	// Set Authorization ONLY when a token exists. GitHub answers 401 "Bad
+	// credentials" to an EMPTY `Bearer ` header — turning an ordinarily-anonymous
+	// public read into a hard failure — so an unauthenticated client must OMIT
+	// the header entirely (verified against api.github.com: omitted → 200,
+	// `Bearer ` → 401). The public-repo-read contract depends on this.
+	if c.Token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.Token)
+	}
 	req.Header.Set("Accept", accept)
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 	if hasBody {

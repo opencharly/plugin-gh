@@ -278,3 +278,31 @@ func TestPRComments_IndexWithIds(t *testing.T) {
 		t.Fatalf("the last comment must carry its id + body: %+v", cms[100])
 	}
 }
+
+// TestDo_EmptyTokenOmitsAuthorization pins the anonymous-read contract: an empty
+// token must NOT emit `Authorization: Bearer ` — GitHub answers 401 "Bad
+// credentials" to that header, turning a public read into a hard failure. With a
+// token the header is present; without one it is absent entirely.
+func TestDo_EmptyTokenOmitsAuthorization(t *testing.T) {
+	var sawAuth string
+	var hadAuth bool
+	c := testClient(t, func(w http.ResponseWriter, r *http.Request) {
+		sawAuth = r.Header.Get("Authorization")
+		_, hadAuth = r.Header["Authorization"]
+		_, _ = w.Write([]byte(`[]`))
+	})
+	c.Token = ""
+	if _, _, _, err := c.getCached(context.Background(), "/x", "application/vnd.github+json", nil); err != nil {
+		t.Fatal(err)
+	}
+	if hadAuth {
+		t.Fatalf("an empty token must OMIT the Authorization header, got %q", sawAuth)
+	}
+	c.Token = "tok"
+	if _, _, _, err := c.getCached(context.Background(), "/y", "application/vnd.github+json", nil); err != nil {
+		t.Fatal(err)
+	}
+	if sawAuth != "Bearer tok" {
+		t.Fatalf("a token must be sent, got %q", sawAuth)
+	}
+}
