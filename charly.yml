@@ -5,7 +5,6 @@
 # malformed `plugin.providers` entry. Declaring discover: scans the candy, so the
 # CUE schema gate + the stock validate step apply. This file also declares the
 # R10 witness beds (below).
-version: 2026.261.1747
 discover:
     - path: candy
       recursive: true
