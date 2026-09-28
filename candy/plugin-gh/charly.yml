@@ -1,6 +1,5 @@
 plugin-gh:
     candy:
-        version: 2026.265.2200
         description: |-
             The canonical GitHub surface — one implementation of the gh read ops
             (pr_meta, pr_files, pr_diff, pr_commits, pr_thread, head_sha) plus
