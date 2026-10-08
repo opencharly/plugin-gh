@@ -330,8 +330,33 @@ func (c *Client) do(ctx context.Context, method, path string, body io.Reader, ha
 		return c.doGetWithRetry(ctx, path, accept, ifNoneMatch)
 	}
 	attemptCtx, cancel := context.WithTimeout(ctx, writeAttemptTimeout)
-	defer cancel()
-	return c.doOnce(attemptCtx, method, path, body, hasBody, accept, ifNoneMatch)
+	resp, err := c.doOnce(attemptCtx, method, path, body, hasBody, accept, ifNoneMatch)
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+	// Read the body INSIDE the attempt, then release the deadline (releaseAttempt). A request
+	// context governs the whole request lifetime INCLUDING the body read, so cancelling it while
+	// the caller still holds the raw response fails a SUCCESSFUL write with `context canceled` —
+	// which is exactly the regression this path shipped for one review round, and the reason the
+	// read path reads in-attempt too. One helper, both paths (R3).
+	resp, _, rerr := releaseAttempt(resp)
+	cancel()
+	if rerr != nil {
+		return nil, fmt.Errorf("gh: %s: read: %w", path, rerr)
+	}
+	return resp, nil
+}
+
+// releaseAttempt reads a response body into memory and returns the SAME response carrying those
+// bytes as an in-memory body, so an attempt's deadline can be released before the caller touches
+// it. `maxBodyBytes` still bounds the read (the memory guard is unchanged), and the response keeps
+// its StatusCode/Header for the caller's own status handling.
+func releaseAttempt(resp *http.Response) (*http.Response, []byte, error) {
+	b, err := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
+	_ = resp.Body.Close()
+	resp.Body = io.NopCloser(bytes.NewReader(b))
+	return resp, b, err
 }
 
 // doGetWithRetry issues a GET under the read policy: per-attempt bound, bounded retries on
@@ -343,24 +368,24 @@ func (c *Client) doGetWithRetry(ctx context.Context, path, accept, ifNoneMatch s
 	budgetCtx, cancelBudget := context.WithTimeout(ctx, readTotalBudget)
 	defer cancelBudget()
 	started := time.Now()
+	attempts := 0      // the attempts REALLY made — the error must not claim a ceiling
+	var lastStatus int // 0 = no response was ever received (a transport-only failure)
 	var lastErr error
-	var lastStatus int
 	for attempt := 1; attempt <= readMaxAttempts; attempt++ {
 		attemptCtx, cancel := context.WithTimeout(budgetCtx, readAttemptTimeout)
+		attempts++
 		resp, err := c.doOnce(attemptCtx, http.MethodGet, path, nil, false, accept, ifNoneMatch)
 		if err != nil {
 			cancel()
 			lastErr = err
-			if !sleepCtx(budgetCtx, backoffDelay(attempt, remainingBudget(budgetCtx, started))) {
+			if !sleepCtx(budgetCtx, backoffDelay(attempt, remainingBudget(budgetCtx))) {
 				break
 			}
 			continue
 		}
-		b, rerr := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
-		_ = resp.Body.Close()
+		resp, _, rerr := releaseAttempt(resp)
 		cancel()
 		if rerr == nil && !retryableStatus(resp.StatusCode) {
-			resp.Body = io.NopCloser(bytes.NewReader(b))
 			return resp, nil
 		}
 		lastStatus = resp.StatusCode
@@ -369,7 +394,7 @@ func (c *Client) doGetWithRetry(ctx context.Context, path, accept, ifNoneMatch s
 		} else {
 			lastErr = fmt.Errorf("HTTP %d", resp.StatusCode)
 		}
-		remaining := remainingBudget(budgetCtx, started)
+		remaining := remainingBudget(budgetCtx)
 		wait := retryAfterDelay(resp.Header.Get("Retry-After"), remaining)
 		if wait == 0 {
 			wait = backoffDelay(attempt, remaining)
@@ -381,12 +406,19 @@ func (c *Client) doGetWithRetry(ctx context.Context, path, accept, ifNoneMatch s
 	if lastErr == nil {
 		lastErr = fmt.Errorf("context deadline exceeded")
 	}
-	return nil, fmt.Errorf("gh: GET %s: %d attempt(s) in %s (status %d): %w",
-		path, readMaxAttempts, time.Since(started).Round(time.Millisecond), lastStatus, lastErr)
+	// The count is the REAL one (a caller-cancelled read that made a single attempt says so), and a
+	// transport-only failure omits a status it never received rather than printing `status 0`.
+	if lastStatus != 0 {
+		return nil, fmt.Errorf("gh: GET %s: %d attempt(s) in %s (status %d): %w",
+			path, attempts, time.Since(started).Round(time.Millisecond), lastStatus, lastErr)
+	}
+	return nil, fmt.Errorf("gh: GET %s: %d attempt(s) in %s: %w",
+		path, attempts, time.Since(started).Round(time.Millisecond), lastErr)
 }
 
-// remainingBudget is what is left of the read budget, never negative.
-func remainingBudget(ctx context.Context, _ time.Time) time.Duration {
+// remainingBudget is what is left of the read budget, never negative. It reads the budget context's
+// own deadline — the wall-clock start time it used to take was dead at every call site.
+func remainingBudget(ctx context.Context) time.Duration {
 	if dl, ok := ctx.Deadline(); ok {
 		if d := time.Until(dl); d > 0 {
 			return d

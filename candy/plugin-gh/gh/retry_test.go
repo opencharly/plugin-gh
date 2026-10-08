@@ -29,7 +29,7 @@ func TestReadRetryPolicy(t *testing.T) {
 	readBackoffBase = time.Millisecond
 	// The write bound is shortened ONLY so the "a stalled write is not retried" case can fail in
 	// milliseconds instead of sixty seconds; production keeps its single 60 s bound untouched.
-	writeAttemptTimeout = 60 * time.Millisecond
+	writeAttemptTimeout = 300 * time.Millisecond
 
 	// stalling builds a server that answers EVERY request with `status`, after sleeping
 	// `stallFor` for the first `stall` of them (so `stall=1` + a sleep longer than the attempt bound
@@ -70,11 +70,48 @@ func TestReadRetryPolicy(t *testing.T) {
 		}
 	})
 
+	t.Run("a SUCCESSFUL write hands its body back readable", func(t *testing.T) {
+		// The regression this pins: a request context governs the whole request lifetime INCLUDING
+		// the body read, so releasing the write's attempt deadline before the caller reads
+		// `resp.Body` makes a SUCCESSFUL POST fail with `context canceled`. The suite could not see
+		// it because every other write case fails first; this one must SUCCEED and be READ.
+		var hits int32
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			atomic.AddInt32(&hits, 1)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			// The body must still be IN FLIGHT when the request returns: a small body a localhost
+			// transport has already buffered survives any context cancellation, which is why a
+			// naive version of this test passed against the very regression it was written for.
+			_, _ = w.Write([]byte(`{"id":42,`))
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+			time.Sleep(100 * time.Millisecond)
+			_, _ = w.Write([]byte(`"state":"created"}`))
+		}))
+		defer srv.Close()
+		c := newClient(srv.URL)
+		var out struct {
+			ID    int    `json:"id"`
+			State string `json:"state"`
+		}
+		if err := c.Post(context.Background(), "/x", map[string]string{"a": "b"}, &out); err != nil {
+			t.Fatalf("a successful POST must hand its body back readable, got: %v", err)
+		}
+		if out.ID != 42 || out.State != "created" {
+			t.Fatalf("the body the caller decoded is %+v, want id=42 state=created", out)
+		}
+		if got := atomic.LoadInt32(&hits); got != 1 {
+			t.Errorf("the server saw %d request(s) for one successful Post, want 1", got)
+		}
+	})
+
 	t.Run("a stalled WRITE is attempted EXACTLY ONCE — the read policy never reaches it", func(t *testing.T) {
 		// The write stalls PAST its own bound, so it FAILS exactly as a transient read failure
 		// would — and it must still be issued only once. A retry here can duplicate a side effect:
 		// that is the R4 line this whole PR exists to keep on the right side of.
-		srv, hits := stalling(readAttemptTimeout*3, http.StatusOK, 1)
+		srv, hits := stalling(2*time.Second, http.StatusOK, 1) // far past the 300ms write bound
 		c := newClient(srv.URL)
 		var out map[string]any
 		err := c.Post(context.Background(), "/x", map[string]string{"a": "b"}, &out)
@@ -164,18 +201,67 @@ func TestReadRetryPolicy(t *testing.T) {
 		}
 	})
 
-	t.Run("cancelling the caller's context stops the backoff", func(t *testing.T) {
-		srv, hits := stalling(0, http.StatusInternalServerError, 99)
-		c := newClient(srv.URL)
-		ctx, cancel := context.WithTimeout(context.Background(), 40*time.Millisecond)
-		defer cancel()
-		var out map[string]any
-		if err := c.Get(ctx, "/x", &out); err == nil {
-			t.Fatal("a cancelled read reported success")
+	t.Run("sleepCtx ends a long wait the moment its context is cancelled", func(t *testing.T) {
+		// This is R4's "the backoff is a cancellable select, never time.Sleep", pinned on the
+		// primitive itself — deterministically, because a jittered backoff makes an elapsed-time
+		// assertion at the loop level flaky and a flaky invariant test is worse than none.
+		cancelled, cancel := context.WithCancel(context.Background())
+		cancel()
+		started := time.Now()
+		if sleepCtx(cancelled, 2*time.Second) {
+			t.Fatal("sleepCtx reported a completed wait on an already-cancelled context")
 		}
-		if got := atomic.LoadInt32(hits); got >= int32(readMaxAttempts) {
-			t.Errorf("the server saw %d request(s) after the caller cancelled; the backoff must be "+
-				"cancellable, never a blind sleep", got)
+		if elapsed := time.Since(started); elapsed > 100*time.Millisecond {
+			t.Errorf("sleepCtx took %s to notice a cancelled context, so it is not a cancellable "+
+				"wait (a blind sleep would block for the full 2s)", elapsed)
+		}
+		if !sleepCtx(context.Background(), 5*time.Millisecond) {
+			t.Error("sleepCtx refused a live 5ms wait")
+		}
+	})
+
+	t.Run("a read already cancelled by its caller names the ONE attempt it made", func(t *testing.T) {
+		// Deterministic by construction — no timer/deadline race: the caller's context is cancelled
+		// BEFORE the call, so the single attempt never reaches the wire and the loop cannot
+		// continue. The pre-fix message claimed the CEILING (`readMaxAttempts`) no matter how many
+		// attempts were really made, which is what this pins.
+		var hits int32
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			atomic.AddInt32(&hits, 1)
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer srv.Close()
+		c := newClient(srv.URL)
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		var out map[string]any
+		err := c.Get(ctx, "/x", &out)
+		if err == nil {
+			t.Fatal("a read on a cancelled context reported success")
+		}
+		if !strings.Contains(err.Error(), "1 attempt(s)") {
+			t.Errorf("the failure must name the attempts really made (1 here), got: %v", err)
+		}
+		if got := atomic.LoadInt32(&hits); got != 0 {
+			t.Errorf("the server saw %d request(s); a context cancelled before the call cannot put one "+
+				"on the wire", got)
+		}
+	})
+
+	t.Run("a transport-only failure omits a status it never received", func(t *testing.T) {
+		// No server at all: every attempt is a transport error, so no status exists. The pre-fix
+		// message printed `(status 0)` for exactly this case.
+		c := newClient("http://127.0.0.1:1")
+		var out map[string]any
+		err := c.Get(context.Background(), "/x", &out)
+		if err == nil {
+			t.Fatal("a read against a closed port reported success")
+		}
+		if strings.Contains(err.Error(), "status 0") {
+			t.Errorf("the failure printed a status it never received, got: %v", err)
+		}
+		if !strings.Contains(err.Error(), "attempt(s)") {
+			t.Errorf("the failure must still name its attempt count, got: %v", err)
 		}
 	})
 }
