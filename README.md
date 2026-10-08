@@ -108,3 +108,23 @@ The live GitHub read tests opt in via `GHKIT_LIVE_REPO` (+ a token) and SKIP
 cleanly otherwise (R7a — never a fabricated response).
 
 *Assisted-by: opencode ollama-cloud/deepseek-v4.1-flash (fully tested and validated)*
+
+## Read retry policy
+
+Every GitHub GET the client issues is bounded **per attempt** and retried on genuinely transient
+outcomes, because a fixed total timeout with no retry turns a momentary upstream stall into a failed
+read of a public, side-effect-free listing (`opencharly/plugin-gh#10`):
+
+| | read (`GET`) | write (`POST`) |
+|---|---|---|
+| attempts | up to **4** | **exactly 1** |
+| per-attempt bound | **20 s** | **60 s** |
+| total budget | **90 s** (attempts + backoff) | — |
+| backoff | exponential, **full jitter**, cancellable | — |
+| retried on | transport/timeout, `429` (honouring `Retry-After`), `502`/`503`/`504` | nothing |
+
+A `4xx` verdict and a `2xx` answer are never retried — a "no" is an answer, not a stall — and a write
+is **never** retried: a second attempt can duplicate a side effect. That invariant is mechanized in
+`gh/retry_test.go` (`a stalled WRITE is attempted EXACTLY ONCE`), so it cannot be relaxed by accident.
+When a read finally fails, the error names the attempt count, so a stall absorbed by policy is
+distinguishable from a verdict.

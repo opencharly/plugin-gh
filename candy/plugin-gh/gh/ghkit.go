@@ -21,14 +21,18 @@
 package gh
 
 import (
+	"bytes"
 	"context"
+	crand "crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"math/big"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -66,8 +70,12 @@ func New() (*Client, error) {
 		BaseURL:     strings.TrimRight(base, "/"),
 		Token:       token,
 		tokenSource: src,
-		HTTP:        &http.Client{Timeout: 60 * time.Second},
-		cache:       newResponseCache(),
+		// HTTP carries NO total bound; every path states its OWN bound explicitly (see the
+		// read policy below). A total client timeout cannot distinguish "one slow attempt" from
+		// "a stall worth retrying", which is exactly what made a transient upstream stall a hard
+		// failure of an idempotent read (opencharly/plugin-gh#10).
+		HTTP:  &http.Client{},
+		cache: newResponseCache(),
 	}, nil
 }
 
@@ -211,11 +219,219 @@ func readResponse(resp *http.Response, path string) ([]byte, error) {
 	return b, nil
 }
 
-// do issues ONE authenticated request and returns the raw response (the caller
-// owns the body). ifNoneMatch adds the conditional header (empty = unconditional).
-// The ONE request constructor every path shares (R3), so auth + the API-version
-// header live in exactly one place.
+// --- the READ retry policy (opencharly/plugin-gh#10) --------------------------------------------
+//
+// THE POLICY, in one place because it is a policy and not a tuning knob:
+//
+//   - Only IDEMPOTENT GETs retry. A write (POST today, and any future PUT/PATCH/DELETE) is issued
+//     EXACTLY ONCE, with the same single bound as before: a retry there could duplicate a side
+//     effect, which is the R4 line this package will not cross by accident.
+//   - A read gets `readAttemptTimeout` PER ATTEMPT (not a total), up to `readMaxAttempts`
+//     attempts, inside ONE `readTotalBudget` so a caller never waits unboundedly.
+//   - Only genuinely transient outcomes retry: a transport error, a timeout, 429 (honouring
+//     `Retry-After`), or 502/503/504. A 4xx verdict and a 2xx answer are never retried — a "no"
+//     is an answer, not a stall.
+//   - Backoff is exponential with FULL JITTER (a random point in [0, min(cap, base*2^n))), so a
+//     fleet of readers does not resynchronise onto the same retry instant.
+//   - The attempt count is surfaced IN THE ERROR when the read finally fails, so a caller can see
+//     that a stall was absorbed by policy rather than by luck. It is deliberately NOT written into
+//     provenance: that is a wire-visible contract owned elsewhere, and a diagnostic must not become
+//     one by accident.
+//
+// They are package-level VARS rather than consts so the policy is deterministic under test — the
+// same seam pattern the retention engine uses for its host probes. Production never writes them;
+// a test that does restores them.
+var (
+	// readAttemptTimeout bounds ONE read attempt (connect + headers + body).
+	readAttemptTimeout = 20 * time.Second
+	// readTotalBudget bounds EVERY attempt plus every backoff of one read.
+	readTotalBudget = 90 * time.Second
+	// readMaxAttempts is the ceiling on attempts per read (1 initial + 3 retries).
+	readMaxAttempts = 4
+	// readBackoffBase/readBackoffCap bound the exponential backoff window.
+	readBackoffBase = 250 * time.Millisecond
+	readBackoffCap  = 4 * time.Second
+	// writeAttemptTimeout is the SINGLE bound a mutating request keeps — the behavioural contract
+	// this change does not touch.
+	writeAttemptTimeout = 60 * time.Second
+)
+
+// retryableStatus reports whether an HTTP status is a transient stall worth another attempt.
+func retryableStatus(code int) bool {
+	switch code {
+	case http.StatusTooManyRequests, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		return true
+	}
+	return false
+}
+
+// retryAfterDelay parses a Retry-After header (delta-seconds form) into a backoff, capped by the
+// remaining budget; an absent or unparseable header returns 0 (use the jittered backoff).
+func retryAfterDelay(h string, remaining time.Duration) time.Duration {
+	if h == "" {
+		return 0
+	}
+	secs, err := strconv.Atoi(strings.TrimSpace(h))
+	if err != nil || secs < 0 {
+		return 0
+	}
+	d := time.Duration(secs) * time.Second
+	if d > remaining {
+		return remaining
+	}
+	return d
+}
+
+// backoffDelay returns the delay before attempt n+1: full jitter inside an exponentially growing
+// window, capped, and never longer than the remaining budget.
+func backoffDelay(attempt int, remaining time.Duration) time.Duration {
+	win := readBackoffBase << (attempt - 1)
+	if win > readBackoffCap {
+		win = readBackoffCap
+	}
+	if win > remaining {
+		win = remaining
+	}
+	if win <= 0 {
+		return 0
+	}
+	n, err := crand.Int(crand.Reader, big.NewInt(int64(win)))
+	if err != nil {
+		return win / 2 // no jitter source: a deterministic midpoint keeps the bound honest
+	}
+	return time.Duration(n.Int64())
+}
+
+// sleepCtx waits for d, or returns early when the context is done. It is a BACKOFF, not a
+// synchronisation primitive: nothing here waits for another actor to catch up (R4).
+func sleepCtx(ctx context.Context, d time.Duration) bool {
+	if d <= 0 {
+		return ctx.Err() == nil
+	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-t.C:
+		return true
+	}
+}
+
+// do issues ONE authenticated request and returns the raw response (the caller owns the body).
+// ifNoneMatch adds the conditional header (empty = unconditional). The ONE request constructor
+// every path shares (R3), so auth + the API-version header live in exactly one place.
+//
+// A GET is routed through doGetWithRetry (the bounded, idempotent-read policy above); every other
+// method goes through doOnce — ONE attempt, one bound. Making that split HERE, on the method,
+// rather than at each call site is what keeps the write path retry-free as the package grows.
 func (c *Client) do(ctx context.Context, method, path string, body io.Reader, hasBody bool, accept, ifNoneMatch string) (*http.Response, error) {
+	if method == http.MethodGet {
+		return c.doGetWithRetry(ctx, path, accept, ifNoneMatch)
+	}
+	attemptCtx, cancel := context.WithTimeout(ctx, writeAttemptTimeout)
+	resp, err := c.doOnce(attemptCtx, method, path, body, hasBody, accept, ifNoneMatch)
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+	// Read the body INSIDE the attempt, then release the deadline (releaseAttempt). A request
+	// context governs the whole request lifetime INCLUDING the body read, so cancelling it while
+	// the caller still holds the raw response fails a SUCCESSFUL write with `context canceled` —
+	// which is exactly the regression this path shipped for one review round, and the reason the
+	// read path reads in-attempt too. One helper, both paths (R3).
+	resp, _, rerr := releaseAttempt(resp)
+	cancel()
+	if rerr != nil {
+		return nil, fmt.Errorf("gh: %s: read: %w", path, rerr)
+	}
+	return resp, nil
+}
+
+// releaseAttempt reads a response body into memory and returns the SAME response carrying those
+// bytes as an in-memory body, so an attempt's deadline can be released before the caller touches
+// it. `maxBodyBytes` still bounds the read (the memory guard is unchanged), and the response keeps
+// its StatusCode/Header for the caller's own status handling.
+func releaseAttempt(resp *http.Response) (*http.Response, []byte, error) {
+	b, err := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
+	_ = resp.Body.Close()
+	resp.Body = io.NopCloser(bytes.NewReader(b))
+	return resp, b, err
+}
+
+// doGetWithRetry issues a GET under the read policy: per-attempt bound, bounded retries on
+// transient outcomes only, full-jitter backoff, one total budget. The body of a SUCCESSFUL attempt
+// is read INSIDE the attempt (so the per-attempt deadline can be released and the connection freed
+// before the response is handed back), and the response the caller receives carries those bytes as
+// an in-memory body — the caller's readResponse works unchanged.
+func (c *Client) doGetWithRetry(ctx context.Context, path, accept, ifNoneMatch string) (*http.Response, error) {
+	budgetCtx, cancelBudget := context.WithTimeout(ctx, readTotalBudget)
+	defer cancelBudget()
+	started := time.Now()
+	attempts := 0      // the attempts REALLY made — the error must not claim a ceiling
+	var lastStatus int // 0 = no response was ever received (a transport-only failure)
+	var lastErr error
+	for attempt := 1; attempt <= readMaxAttempts; attempt++ {
+		attemptCtx, cancel := context.WithTimeout(budgetCtx, readAttemptTimeout)
+		attempts++
+		resp, err := c.doOnce(attemptCtx, http.MethodGet, path, nil, false, accept, ifNoneMatch)
+		if err != nil {
+			cancel()
+			lastErr = err
+			if !sleepCtx(budgetCtx, backoffDelay(attempt, remainingBudget(budgetCtx))) {
+				break
+			}
+			continue
+		}
+		resp, _, rerr := releaseAttempt(resp)
+		cancel()
+		if rerr == nil && !retryableStatus(resp.StatusCode) {
+			return resp, nil
+		}
+		lastStatus = resp.StatusCode
+		if rerr != nil {
+			lastErr = fmt.Errorf("read: %w", rerr)
+		} else {
+			lastErr = fmt.Errorf("HTTP %d", resp.StatusCode)
+		}
+		remaining := remainingBudget(budgetCtx)
+		wait := retryAfterDelay(resp.Header.Get("Retry-After"), remaining)
+		if wait == 0 {
+			wait = backoffDelay(attempt, remaining)
+		}
+		if !sleepCtx(budgetCtx, wait) {
+			break
+		}
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("context deadline exceeded")
+	}
+	// The count is the REAL one (a caller-cancelled read that made a single attempt says so), and a
+	// transport-only failure omits a status it never received rather than printing `status 0`.
+	if lastStatus != 0 {
+		return nil, fmt.Errorf("gh: GET %s: %d attempt(s) in %s (status %d): %w",
+			path, attempts, time.Since(started).Round(time.Millisecond), lastStatus, lastErr)
+	}
+	return nil, fmt.Errorf("gh: GET %s: %d attempt(s) in %s: %w",
+		path, attempts, time.Since(started).Round(time.Millisecond), lastErr)
+}
+
+// remainingBudget is what is left of the read budget, never negative. It reads the budget context's
+// own deadline — the wall-clock start time it used to take was dead at every call site.
+func remainingBudget(ctx context.Context) time.Duration {
+	if dl, ok := ctx.Deadline(); ok {
+		if d := time.Until(dl); d > 0 {
+			return d
+		}
+		return 0
+	}
+	return readTotalBudget
+}
+
+// doOnce is ONE request attempt — the body this package always had, unchanged (auth, the
+// API-version header, the conditional header, the single caller-visible error wrap). It is the
+// ONLY place a write is ever issued.
+func (c *Client) doOnce(ctx context.Context, method, path string, body io.Reader, hasBody bool, accept, ifNoneMatch string) (*http.Response, error) {
 	req, err := http.NewRequestWithContext(ctx, method, c.BaseURL+path, body)
 	if err != nil {
 		return nil, err
