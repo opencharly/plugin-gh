@@ -57,5 +57,8 @@ plugin-gh:
             - check: "the embedded #GhDocument schema compiles, validates a sample, and serializes"
               id: plugin-gh-document-self-test
               context: [runtime]
-              command: "charly gh --self-test"
+              # The active binary the runner stamps, so this step proves the
+              # plugin under test even on a host with no `charly` on PATH (it
+              # failed exit 127 there before this fix).
+              command: "${CHARLY_BIN} gh --self-test"
               exit_status: 0

@@ -20,7 +20,7 @@
 	// op — the read to run. The first six are the original PR reads; `document`
 	// assembles the full structured issue/PR artifact; `issues` lists a repo's or
 	// an org's issues AND pull requests as a compact index.
-	op: "pr_meta" | "pr_files" | "pr_diff" | "pr_commits" | "pr_thread" | "head_sha" | "document" | "issues" @go(Op)
+	op: or(_opWord) @go(Op)
 	// repo — the FULL slug (owner/name) — e.g. omacom/omarchy. Required for the
 	// single-item reads and for a repo-scoped `issues` list; omitted for an
 	// org-scoped `issues` list.
@@ -33,9 +33,9 @@
 	number?: int & >0 @go(Number,type=int)
 	// target — document only: which artifact to assemble. Omitted auto-detects
 	// (a pull request number yields a PR document; anything else an issue).
-	target?: "issue" | "pr" @go(Target)
+	target?: or(_targetWord) @go(Target)
 	// format — document only: the serialization of the emitted file (default json).
-	format?: "json" | "yaml" @go(Format)
+	format?: or(_formatWord) @go(Format)
 	// out — document only: write the serialized document to this path. Omitted
 	// returns the document inline in the verb result.
 	out?: string @go(Out)
@@ -45,11 +45,11 @@
 	// disables it; a binary or oversized file is recorded with omitted_reason.
 	include_file_content?: bool @go(IncludeFileContent,type=*bool)
 	// state — issues only: the state filter (default open).
-	state?: "open" | "closed" | "all" @go(State,type=string)
+	state?: or(_stateWord) @go(State,type=string)
 	// kind — issues only: filter to issues, pull requests, or both (default all).
 	// GitHub has no server-side issue-only filter here, so this is applied
 	// client-side off the `pull_request` marker.
-	kind?: "issue" | "pr" | "all" @go(Kind,type=string)
+	kind?: or(_kindWord) @go(Kind,type=string)
 	// since — issues only: only items updated at/after this RFC3339 timestamp
 	// (the incremental-refresh knob; also narrows an ETag-keyed page set).
 	since?: string @go(Since)
@@ -65,7 +65,7 @@
 // the inline review comments. PR documents additionally carry the commits and
 // every changed file (patch + optional full content at head).
 #GhDocument: {
-	kind:   "issue" | "pr" @go(Kind)
+	kind:   or(_targetWord) @go(Kind)
 	repo:   string          @go(Repo)
 	number: int             @go(Number,type=int)
 	url:    string          @go(URL)
@@ -224,3 +224,36 @@
 	// merged_at is set once the PR merged (the pull_request.merged_at member).
 	merged_at?: string @go(MergedAt)
 }
+
+// --- vocabulary tables (S3) --------------------------------------------------
+// Every closed set of words is a table keyed by word, and its word list is
+// derived from the table and used as `or()` of that list (§10.1 S3, D-PAT-3).
+// The table and the enum it feeds therefore cannot disagree, and a new word is
+// ONE row here. `@vocab` names the owner (§3.1): this set is compiled into THIS
+// plugin, so the owner is the plugin's own word `gh`.
+_op: {
+	pr_meta: {}
+	pr_files: {}
+	pr_diff: {}
+	pr_commits: {}
+	pr_thread: {}
+	head_sha: {}
+	document: {}
+	issues: {}
+} @vocab(gh)
+_opWord: [for w, _ in _op {w}]
+
+// ONE table for the ONE two-word artifact kind the input selects (`target`) and
+// the emitted document names (`#GhDocument.kind`): extracting on the second
+// occurrence keeps the single home.
+_target: {issue: {}, pr: {}} @vocab(gh)
+_targetWord: [for w, _ in _target {w}]
+
+_format: {json: {}, yaml: {}} @vocab(gh)
+_formatWord: [for w, _ in _format {w}]
+
+_state: {open: {}, closed: {}, all: {}} @vocab(gh)
+_stateWord: [for w, _ in _state {w}]
+
+_kind: {issue: {}, pr: {}, all: {}} @vocab(gh)
+_kindWord: [for w, _ in _kind {w}]
